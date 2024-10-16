@@ -2001,8 +2001,10 @@ def rasterize_to_pixels_pgsr(
     conics: Tensor,  # [C, N, 3] or [nnz, 3]
     colors: Tensor,  # [C, N, channels] or [nnz, channels]
     opacities: Tensor,  # [C, N] or [nnz]
+    all_map: Tensor,  # [C, 4, 4]
     image_width: int,
     image_height: int,
+    Ks: Tensor,  # [C, 3, 3]
     tile_size: int,
     isect_offsets: Tensor,  # [C, tile_height, tile_width]
     flatten_ids: Tensor,  # [n_isects]
@@ -2010,7 +2012,7 @@ def rasterize_to_pixels_pgsr(
     masks: Optional[Tensor] = None,  # [C, tile_height, tile_width]
     packed: bool = False,
     absgrad: bool = False,
-) -> Tuple[Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Rasterizes Gaussians to pixels.
 
     Args:
@@ -2034,6 +2036,8 @@ def rasterize_to_pixels_pgsr(
         - **Rendered colors**. [C, image_height, image_width, channels]
         - **Rendered alphas**. [C, image_height, image_width, 1]
     """
+
+    assert Ks.shape[0] == 1, "Only support single camera"
 
     C = isect_offsets.size(0)
     device = means2d.device
@@ -2111,15 +2115,17 @@ def rasterize_to_pixels_pgsr(
         tile_width * tile_size >= image_width
     ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
 
-    render_colors, render_alphas = _RasterizeToPixels.apply(
+    render_colors, render_alphas, observe, out_all_map, depths = _RasterizeToPixelsPGSR.apply(
         means2d.contiguous(),
         conics.contiguous(),
         colors.contiguous(),
         opacities.contiguous(),
         backgrounds,
         masks,
+        all_map,
         image_width,
         image_height,
+        Ks,
         tile_size,
         isect_offsets.contiguous(),
         flatten_ids.contiguous(),
@@ -2128,7 +2134,7 @@ def rasterize_to_pixels_pgsr(
 
     if padded_channels > 0:
         render_colors = render_colors[..., :-padded_channels]
-    return render_colors, render_alphas
+    return render_colors, render_alphas, observe, out_all_map, depths
 
 
 class _RasterizeToPixelsPGSR(torch.autograd.Function):
@@ -2143,14 +2149,16 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
         opacities: Tensor,  # [C, N]
         backgrounds: Tensor,  # [C, D], Optional
         masks: Tensor,  # [C, tile_height, tile_width], Optional
+        all_map: Tensor,  # [C, tile_height, tile_width, 5]
         width: int,
         height: int,
+        Ks: Tensor, # [C, 3, 3]
         tile_size: int,
         isect_offsets: Tensor,  # [C, tile_height, tile_width]
         flatten_ids: Tensor,  # [n_isects]
         absgrad: bool,
-    ) -> Tuple[Tensor, Tensor]:
-        render_colors, render_alphas, last_ids = _make_lazy_cuda_func(
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        render_colors, render_alphas, last_ids, observe, out_all_map, depths = _make_lazy_cuda_func(
             "rasterize_to_pixels_pgsr_fwd"
         )(
             means2d,
@@ -2159,11 +2167,17 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
             opacities,
             backgrounds,
             masks,
+            all_map,
             width,
             height,
             tile_size,
+            Ks[0, 0, 0],
+            Ks[0, 1, 1],
+            Ks[0, 0, 2],
+            Ks[0, 1, 2],
             isect_offsets,
             flatten_ids,
+            True
         )
 
         ctx.save_for_backward(
@@ -2173,6 +2187,9 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
             opacities,
             backgrounds,
             masks,
+            Ks,
+            all_map,
+            observe, out_all_map, depths,
             isect_offsets,
             flatten_ids,
             render_alphas,
@@ -2185,13 +2202,16 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
 
         # double to float
         render_alphas = render_alphas.float()
-        return render_colors, render_alphas
+        return render_colors, render_alphas, observe, out_all_map, depths
 
     @staticmethod
     def backward(
         ctx,
         v_render_colors: Tensor,  # [C, H, W, 3]
         v_render_alphas: Tensor,  # [C, H, W, 1]
+        v_observe: Tensor,
+        v_out_all_map: Tensor,
+        v_depths: Tensor,
     ):
         (
             means2d,
@@ -2200,6 +2220,9 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
             opacities,
             backgrounds,
             masks,
+            Ks,
+            all_map,
+            observe, out_all_map, depths,
             isect_offsets,
             flatten_ids,
             render_alphas,
@@ -2216,6 +2239,7 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
             v_conics,
             v_colors,
             v_opacities,
+            v_all_maps
         ) = _make_lazy_cuda_func("rasterize_to_pixels_pgsr_bwd")(
             means2d,
             conics,
@@ -2225,14 +2249,21 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
             masks,
             width,
             height,
+            Ks[0, 0, 0],
+            Ks[0, 1, 1],
             tile_size,
             isect_offsets,
             flatten_ids,
             render_alphas,
             last_ids,
+            all_map,
+            out_all_map,
             v_render_colors.contiguous(),
             v_render_alphas.contiguous(),
+            v_out_all_map.contiguous(),
+            v_depths.contiguous(),
             absgrad,
+            True
         )
 
         if absgrad:
@@ -2251,6 +2282,8 @@ class _RasterizeToPixelsPGSR(torch.autograd.Function):
             v_colors,
             v_opacities,
             v_backgrounds,
+            None,
+            v_all_maps,
             None,
             None,
             None,

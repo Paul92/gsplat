@@ -7,13 +7,15 @@
 
 namespace gsplat {
 
+#define MAP_N_LOCAL 5
+
 namespace cg = cooperative_groups;
 
 /****************************************************************************
  * Rasterization to Pixels Backward Pass
  ****************************************************************************/
 
-template <uint32_t COLOR_DIM, typename S>
+template <uint32_t COLOR_DIM, uint32_t MAP_N, typename S>
 __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
     const uint32_t C,
     const uint32_t N,
@@ -28,6 +30,8 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
     const bool *__restrict__ masks,    // [C, tile_height, tile_width]
     const uint32_t image_width,
     const uint32_t image_height,
+    const float fx,
+    const float fy,
     const uint32_t tile_size,
     const uint32_t tile_width,
     const uint32_t tile_height,
@@ -36,16 +40,22 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
     // fwd outputs
     const S *__restrict__ render_alphas,  // [C, image_height, image_width, 1]
     const int32_t *__restrict__ last_ids, // [C, image_height, image_width]
+    const S *__restrict__ all_maps,
+    const S *__restrict__ all_map_pixels,
     // grad outputs
     const S *__restrict__ v_render_colors, // [C, image_height, image_width,
                                            // COLOR_DIM]
     const S *__restrict__ v_render_alphas, // [C, image_height, image_width, 1]
+    const S *__restrict__ v_render_all_maps,
+    const S *__restrict__ v_render_depths,
     // grad inputs
     vec2<S> *__restrict__ v_means2d_abs, // [C, N, 2] or [nnz, 2]
     vec2<S> *__restrict__ v_means2d,     // [C, N, 2] or [nnz, 2]
     vec3<S> *__restrict__ v_conics,      // [C, N, 3] or [nnz, 3]
     S *__restrict__ v_colors,   // [C, N, COLOR_DIM] or [nnz, COLOR_DIM]
-    S *__restrict__ v_opacities // [C, N] or [nnz]
+    S *__restrict__ v_opacities, // [C, N] or [nnz]
+    S *__restrict__ v_all_maps,
+    const bool render_geo
 ) {
     auto block = cg::this_thread_block();
     uint32_t camera_id = block.group_index().x;
@@ -59,6 +69,8 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
     last_ids += camera_id * image_height * image_width;
     v_render_colors += camera_id * image_height * image_width * COLOR_DIM;
     v_render_alphas += camera_id * image_height * image_width;
+    v_render_depths += camera_id * image_height * image_width;
+    v_render_all_maps += camera_id * image_height * image_width * MAP_N;
     if (backgrounds != nullptr) {
         backgrounds += camera_id * COLOR_DIM;
     }
@@ -74,6 +86,8 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
 
     const S px = (S)j + 0.5f;
     const S py = (S)i + 0.5f;
+    const vec2<S> ray = { (px - image_width * 0.5) / fx, (py - image_height * 0.5) / fy };
+
     // clamp this value to the last pixel
     const int32_t pix_id =
         min(i * image_width + j, image_width * image_height - 1);
@@ -101,6 +115,7 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
         reinterpret_cast<vec3<float> *>(&xy_opacity_batch[block_size]
         );                                         // [block_size]
     S *rgbs_batch = (S *)&conic_batch[block_size]; // [block_size * COLOR_DIM]
+    S *all_maps_batch = (S *)&rgbs_batch[block_size * COLOR_DIM];
 
     // this is the T AFTER the last gaussian in this pixel
     S T_final = 1.0f - render_alphas[pix_id];
@@ -117,6 +132,22 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
         v_render_c[k] = v_render_colors[pix_id * COLOR_DIM + k];
     }
     const S v_render_a = v_render_alphas[pix_id];
+
+    S v_all_map[MAP_N] = {0.f};
+    if(render_geo) {
+        for (int i = 0; i < MAP_N; i++) {
+//            printf("pix_id: %d, i: %d, vector idx %d, value %f\n", pix_id, i, pix_id * MAP_N + i, all_map_pixels[pix_id * MAP_N + i]);
+            v_all_map[i] = v_render_all_maps[i + pix_id * MAP_N];
+        }
+        const uint32_t image_size = image_width * image_height;
+        const float3 normal = {all_map_pixels[pix_id], all_map_pixels[image_size + pix_id], all_map_pixels[2 * image_size + pix_id]};
+        const float distance = all_map_pixels[4 * image_size + pix_id];
+        const float tmp = (normal.x * ray.x + normal.y * ray.y + normal.z + 1.0e-8);
+        v_all_map[MAP_N-1] += (-v_render_depths[pix_id] / tmp);
+        v_all_map[0] += v_render_depths[pix_id] * (distance / (tmp * tmp) * ray.x);
+        v_all_map[1] += v_render_depths[pix_id] * (distance / (tmp * tmp) * ray.y);
+        v_all_map[2] += v_render_depths[pix_id] * (distance / (tmp * tmp));
+    }
 
     // collect and process batches of gaussians
     // each thread loads one gaussian at a time before rasterizing
@@ -147,7 +178,18 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
             for (uint32_t k = 0; k < COLOR_DIM; ++k) {
                 rgbs_batch[tr * COLOR_DIM + k] = colors[g * COLOR_DIM + k];
             }
+            if (render_geo) {
+                for (uint32_t i = 0; i < MAP_N; i++) {
+                    all_maps_batch[tr * MAP_N + i] = all_maps[g * MAP_N + i];
+                }
+            }
         }
+
+        S last_alpha = 0;
+        S accum_all_map[MAP_N] = {0.f};
+        S last_all_map[MAP_N] = {0.f};
+
+
         // wait for other threads to collect the gaussians in batch
         block.sync();
         // process gaussians in the current batch for this pixel
@@ -163,6 +205,7 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
             vec2<S> delta;
             vec3<S> conic;
             S vis;
+            S all_map[MAP_N];
 
             if (valid) {
                 conic = conic_batch[t];
@@ -177,6 +220,11 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
                 if (sigma < 0.f || alpha < 1.f / 255.f) {
                     valid = false;
                 }
+                if (render_geo) {
+                    for (int i = 0; i < MAP_N; i++) {
+                        all_map[i] = all_maps_batch[t];
+                    }
+                }
             }
 
             // if all threads are inactive in this warp, skip this loop
@@ -188,6 +236,7 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
             vec2<S> v_xy_local = {0.f, 0.f};
             vec2<S> v_xy_abs_local = {0.f, 0.f};
             S v_opacity_local = 0.f;
+            S v_all_map_local[MAP_N] = {0.f};
             // initialize everything to 0, only set if the lane is valid
             if (valid) {
                 // compute the current T for this gaussian
@@ -218,6 +267,23 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
                     v_alpha += -T_final * ra * accum;
                 }
 
+                if (render_geo) {
+                    GSPLAT_PRAGMA_UNROLL
+                    for (int ch = 0; ch < MAP_N; ch++)
+                    {
+                        // Update last color (to be used in the next iteration)
+                        accum_all_map[ch] = last_alpha * last_all_map[ch] + (1.f - last_alpha) * accum_all_map[ch];
+                        last_all_map[ch] = all_map[ch];
+
+                        v_alpha += (all_map[ch] - accum_all_map[ch]) * v_all_map[ch];
+                        // Update the gradients w.r.t. color of the Gaussian.
+                        // Atomic, since this pixel is just one of potentially
+                        // many that were affected by this Gaussian.
+                        v_all_map_local[ch] = fac * v_all_map[ch];
+                    }
+                }
+
+
                 if (opac * vis <= 0.999f) {
                     const S v_sigma = -opac * vis * v_alpha;
                     v_conic_local = {
@@ -239,6 +305,7 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
                 for (uint32_t k = 0; k < COLOR_DIM; ++k) {
                     buffer[k] += rgbs_batch[t * COLOR_DIM + k] * fac;
                 }
+                last_alpha = alpha;
             }
             warpSum<COLOR_DIM, S>(v_rgb_local, warp);
             warpSum<decltype(warp), S>(v_conic_local, warp);
@@ -271,13 +338,21 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
                 }
 
                 gpuAtomicAdd(v_opacities + g, v_opacity_local);
+
+                GSPLAT_PRAGMA_UNROLL
+                for (int ch = 0; ch < MAP_N; ch++)
+                {
+                    S *v_all_map_ptr = (S *)(v_all_maps) + MAP_N * g;
+                    gpuAtomicAdd(v_all_map_ptr + ch, v_all_map_local[ch]);
+                }
             }
         }
     }
 }
 
-template <uint32_t CDIM>
+template <uint32_t CDIM, uint32_t MAP_N>
 std::tuple<
+    torch::Tensor,
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
@@ -294,6 +369,8 @@ call_kernel_with_dim(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
+    const float fx,
+    const float fy,
     const uint32_t tile_size,
     // intersections
     const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
@@ -301,11 +378,16 @@ call_kernel_with_dim(
     // forward outputs
     const torch::Tensor &render_alphas, // [C, image_height, image_width, 1]
     const torch::Tensor &last_ids,      // [C, image_height, image_width]
+    const torch::Tensor &all_maps,
+    const torch::Tensor &all_map_pixels,
     // gradients of outputs
     const torch::Tensor &v_render_colors, // [C, image_height, image_width, 3]
     const torch::Tensor &v_render_alphas, // [C, image_height, image_width, 1]
+    const torch::Tensor &v_render_all_maps,
+    const torch::Tensor &v_render_depths,
     // options
-    bool absgrad
+    bool absgrad,
+    bool render_geo
 ) {
 
     GSPLAT_DEVICE_GUARD(means2d);
@@ -317,8 +399,12 @@ call_kernel_with_dim(
     GSPLAT_CHECK_INPUT(flatten_ids);
     GSPLAT_CHECK_INPUT(render_alphas);
     GSPLAT_CHECK_INPUT(last_ids);
+    GSPLAT_CHECK_INPUT(all_maps);
+    GSPLAT_CHECK_INPUT(all_map_pixels);
     GSPLAT_CHECK_INPUT(v_render_colors);
     GSPLAT_CHECK_INPUT(v_render_alphas);
+    GSPLAT_CHECK_INPUT(v_render_all_maps);
+    GSPLAT_CHECK_INPUT(v_render_depths);
     if (backgrounds.has_value()) {
         GSPLAT_CHECK_INPUT(backgrounds.value());
     }
@@ -348,16 +434,20 @@ call_kernel_with_dim(
     if (absgrad) {
         v_means2d_abs = torch::zeros_like(means2d);
     }
+    torch::Tensor v_all_maps;
+    if (render_geo) {
+        v_all_maps = torch::zeros_like(all_maps);
+    }
 
     if (n_isects) {
         const uint32_t shared_mem =
             tile_size * tile_size *
             (sizeof(int32_t) + sizeof(vec3<float>) + sizeof(vec3<float>) +
-             sizeof(float) * COLOR_DIM);
+             sizeof(float) * COLOR_DIM + sizeof(float) * MAP_N);
         at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
         if (cudaFuncSetAttribute(
-                rasterize_to_pixels_pgsr_bwd_kernel<CDIM, float>,
+                rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, float>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize,
                 shared_mem
             ) != cudaSuccess) {
@@ -367,7 +457,7 @@ call_kernel_with_dim(
                 " bytes), try lowering tile_size."
             );
         }
-        rasterize_to_pixels_pgsr_bwd_kernel<CDIM, float>
+        rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, float>
             <<<blocks, threads, shared_mem, stream>>>(
                 C,
                 N,
@@ -382,6 +472,7 @@ call_kernel_with_dim(
                 masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
                 image_width,
                 image_height,
+                fx, fy,
                 tile_size,
                 tile_width,
                 tile_height,
@@ -389,8 +480,12 @@ call_kernel_with_dim(
                 flatten_ids.data_ptr<int32_t>(),
                 render_alphas.data_ptr<float>(),
                 last_ids.data_ptr<int32_t>(),
+                all_maps.data_ptr<float>(),
+                all_map_pixels.data_ptr<float>(),
                 v_render_colors.data_ptr<float>(),
                 v_render_alphas.data_ptr<float>(),
+                v_render_all_maps.data_ptr<float>(),
+                v_render_depths.data_ptr<float>(),
                 absgrad ? reinterpret_cast<vec2<float> *>(
                               v_means2d_abs.data_ptr<float>()
                           )
@@ -398,16 +493,19 @@ call_kernel_with_dim(
                 reinterpret_cast<vec2<float> *>(v_means2d.data_ptr<float>()),
                 reinterpret_cast<vec3<float> *>(v_conics.data_ptr<float>()),
                 v_colors.data_ptr<float>(),
-                v_opacities.data_ptr<float>()
+                v_opacities.data_ptr<float>(),
+                v_all_maps.data_ptr<float>(),
+                render_geo
             );
     }
 
     return std::make_tuple(
-        v_means2d_abs, v_means2d, v_conics, v_colors, v_opacities
+        v_means2d_abs, v_means2d, v_conics, v_colors, v_opacities, v_all_maps
     );
 }
 
 std::tuple<
+    torch::Tensor,
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
@@ -424,6 +522,8 @@ rasterize_to_pixels_pgsr_bwd_tensor(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
+    const float fx,
+    const float fy,
     const uint32_t tile_size,
     // intersections
     const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
@@ -431,11 +531,16 @@ rasterize_to_pixels_pgsr_bwd_tensor(
     // forward outputs
     const torch::Tensor &render_alphas, // [C, image_height, image_width, 1]
     const torch::Tensor &last_ids,      // [C, image_height, image_width]
+    const torch::Tensor &all_maps,
+    const torch::Tensor &all_map_pixels,
     // gradients of outputs
     const torch::Tensor &v_render_colors, // [C, image_height, image_width, 3]
     const torch::Tensor &v_render_alphas, // [C, image_height, image_width, 1]
+    const torch::Tensor &v_render_all_maps,
+    const torch::Tensor &v_render_depths,
     // options
-    bool absgrad
+    bool absgrad,
+    bool render_geo
 ) {
 
     GSPLAT_CHECK_INPUT(colors);
@@ -443,7 +548,7 @@ rasterize_to_pixels_pgsr_bwd_tensor(
 
 #define __GS__CALL_(N)                                                         \
     case N:                                                                    \
-        return call_kernel_with_dim<N>(                                        \
+        return call_kernel_with_dim<N, MAP_N_LOCAL>(                           \
             means2d,                                                           \
             conics,                                                            \
             colors,                                                            \
@@ -452,14 +557,20 @@ rasterize_to_pixels_pgsr_bwd_tensor(
             masks,                                                             \
             image_width,                                                       \
             image_height,                                                      \
+            fx, fy,                                                            \
             tile_size,                                                         \
             tile_offsets,                                                      \
             flatten_ids,                                                       \
             render_alphas,                                                     \
             last_ids,                                                          \
+            all_maps,                                                          \
+            all_map_pixels,                                                    \
             v_render_colors,                                                   \
             v_render_alphas,                                                   \
-            absgrad                                                            \
+            v_render_all_maps,                                                 \
+            v_render_depths,                                                   \
+            absgrad,                                                           \
+            render_geo                                                         \
         );
 
     switch (COLOR_DIM) {

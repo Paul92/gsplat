@@ -4,6 +4,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.distributed
 import torch.nn.functional as F
+from gsplat.utils import normalized_quat_to_rotmat
 from torch import Tensor
 from typing_extensions import Literal
 
@@ -14,7 +15,7 @@ from .cuda._wrapper import (
     isect_tiles,
     rasterize_to_pixels,
     rasterize_to_pixels_2dgs,
-    spherical_harmonics,
+    spherical_harmonics, rasterize_to_pixels_pgsr,
 )
 from .distributed import (
     all_gather_int32,
@@ -1467,7 +1468,6 @@ def rasterization_2dgs_inria_wrapper(
     }
     return (render_colors, render_alphas), meta
 
-
 def rasterization_pgsr(
     means: Tensor,  # [N, 3]
     quats: Tensor,  # [N, 4]
@@ -1736,6 +1736,37 @@ def rasterization_pgsr(
         # Silently change C from local #Cameras to global #Cameras.
         C = len(viewmats)
 
+    def get_smallest_axis(return_idx=False):
+        unit_quats = quats / quats.norm(dim=-1, keepdim=True)
+        rotation_matrices = normalized_quat_to_rotmat(unit_quats)
+        smallest_axis_idx = scales.min(dim=-1)[1][..., None, None].expand(-1, 3, -1)
+        smallest_axis = rotation_matrices.gather(2, smallest_axis_idx)
+        if return_idx:
+            return smallest_axis.squeeze(dim=2), smallest_axis_idx[..., 0, 0]
+        return smallest_axis.squeeze(dim=2)
+
+    def get_normal(viewmat):
+        normal_global = get_smallest_axis()
+        gaussian_to_cam_global = viewmat[:3,3] - means
+        neg_mask = (normal_global * gaussian_to_cam_global).sum(-1) < 0.0
+        normal_global[neg_mask] = -normal_global[neg_mask]
+        return normal_global
+
+    def compute_all_map(viewmat):
+        global_normal = get_normal(viewmat)
+        local_normal = global_normal @ viewmat[:3, :3]
+        pts_in_cam = means @ viewmat[:3, :3] + viewmat[3,:3]
+        depth_z = pts_in_cam[:, 2]
+        local_distance = (local_normal * pts_in_cam).sum(-1).abs()
+        input_all_map = torch.zeros((means.shape[0], 5)).cuda().float()
+        input_all_map[:, :3] = local_normal
+        input_all_map[:, 3] = 1.0
+        input_all_map[:, 4] = local_distance
+        return input_all_map
+
+
+
+
     # Project Gaussians to 2D. Directly pass in {quats, scales} is faster than precomputing covars.
     proj_results = fully_fused_projection(
         means,
@@ -1755,6 +1786,9 @@ def rasterization_pgsr(
         calc_compensations=(rasterize_mode == "antialiased"),
         camera_model=camera_model,
     )
+
+    assert Ks.shape[0] == 1, "Only support single camera for now"
+    assert viewmats.shape[0] == 1, "Only support single camera for now"
 
     if packed:
         # The results are packed into shape [nnz, ...]. All elements are valid.
@@ -1998,19 +2032,22 @@ def rasterization_pgsr(
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
     else:
-        render_colors, render_alphas = rasterize_to_pixels(
+        render_colors, render_alphas, observe, out_all_map, depths = rasterize_to_pixels_pgsr(
             means2d,
             conics,
             colors,
             opacities,
+            # compute_all_map(viewmats[0]),
+            torch.zeros((means.shape[0], 5)).cuda().float(),
             width,
             height,
+            Ks,
             tile_size,
             isect_offsets,
             flatten_ids,
             backgrounds=backgrounds,
             packed=packed,
-            absgrad=absgrad,
+            absgrad=absgrad
         )
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth

@@ -501,6 +501,76 @@ void selective_adam_update(
     const uint32_t N,
     const uint32_t M);
 
+
+
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+rasterize_to_pixels_pgsr_fwd_tensor(
+        // Gaussian parameters
+        const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
+        const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
+        const torch::Tensor &colors,    // [C, N, channels] or [nnz, channels]
+        const torch::Tensor &opacities, // [C, N]  or [nnz]
+        const at::optional<torch::Tensor> &backgrounds, // [C, channels]
+        const at::optional<torch::Tensor> &masks, // [C, tile_height, tile_width]
+        const torch::Tensor &all_map,    // [C, N, ALL_MAP]
+        // image size
+        const uint32_t image_width,
+        const uint32_t image_height,
+        const uint32_t tile_size,
+        const float focal_x,
+        const float focal_y,
+        const float cx,
+        const float cy,
+        // intersections
+        const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
+        const torch::Tensor &flatten_ids,   // [n_isects]
+        // options
+        bool render_geo
+);
+
+    std::tuple<
+            torch::Tensor,
+            torch::Tensor,
+            torch::Tensor,
+            torch::Tensor,
+            torch::Tensor,
+            torch::Tensor>
+    rasterize_to_pixels_pgsr_bwd_tensor(
+            // Gaussian parameters
+            const torch::Tensor &means2d,                   // [C, N, 2] or [nnz, 2]
+            const torch::Tensor &conics,                    // [C, N, 3] or [nnz, 3]
+            const torch::Tensor &colors,                    // [C, N, 3] or [nnz, 3]
+            const torch::Tensor &opacities,                 // [C, N] or [nnz]
+            const at::optional<torch::Tensor> &backgrounds, // [C, 3]
+            const at::optional<torch::Tensor> &masks, // [C, tile_height, tile_width]
+            // image size
+            const uint32_t image_width,
+            const uint32_t image_height,
+            const float fx,
+            const float fy,
+            const uint32_t tile_size,
+            // intersections
+            const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
+            const torch::Tensor &flatten_ids,  // [n_isects]
+            // forward outputs
+            const torch::Tensor &render_alphas, // [C, image_height, image_width, 1]
+            const torch::Tensor &last_ids,      // [C, image_height, image_width]
+            const torch::Tensor &all_maps,
+            const torch::Tensor &all_map_pixels,
+            // gradients of outputs
+            const torch::Tensor &v_render_colors, // [C, image_height, image_width, 3]
+            const torch::Tensor &v_render_alphas, // [C, image_height, image_width, 1]
+            const torch::Tensor &v_render_all_maps,
+            const torch::Tensor &v_render_depths,
+            // options
+            bool absgrad,
+            bool render_geo
+    );
+
+
 } // namespace gsplat
+
+
 
 #endif // GSPLAT_CUDA_BINDINGS_H

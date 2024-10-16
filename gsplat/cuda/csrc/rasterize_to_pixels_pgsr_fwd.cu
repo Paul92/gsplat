@@ -5,6 +5,8 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
+#define ALL_MAP_VAL 5
+
 namespace gsplat {
 
 namespace cg = cooperative_groups;
@@ -13,7 +15,7 @@ namespace cg = cooperative_groups;
  * Rasterization to Pixels Forward Pass
  ****************************************************************************/
 
-template <uint32_t COLOR_DIM, typename S>
+template <uint32_t COLOR_DIM, uint32_t ALL_MAP, typename S>
 __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     const uint32_t C,
     const uint32_t N,
@@ -25,6 +27,12 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     const S *__restrict__ opacities,   // [C, N] or [nnz]
     const S *__restrict__ backgrounds, // [C, COLOR_DIM]
     const bool *__restrict__ masks,    // [C, tile_height, tile_width]
+    // PGSR parameters
+    const S focal_x, const float focal_y,
+    const S cx, const float cy,
+//    const S* __restrict__ viewmatrix,
+//    const S* __restrict__ cam_pos,
+    const S* __restrict__ all_map,
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
@@ -34,7 +42,12 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     S *__restrict__ render_colors, // [C, image_height, image_width, COLOR_DIM]
     S *__restrict__ render_alphas, // [C, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids // [C, image_height, image_width]
+    int32_t *__restrict__ last_ids, // [C, image_height, image_width]
+    // PGSR outputs
+    int* __restrict__ out_observe,
+    S* __restrict__ out_all_map,
+    S* __restrict__ out_plane_depth,
+    const bool render_geo
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -49,6 +62,11 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     tile_offsets += camera_id * tile_height * tile_width;
     render_colors += camera_id * image_height * image_width * COLOR_DIM;
     render_alphas += camera_id * image_height * image_width;
+
+    out_observe += camera_id * image_height * image_width;
+    out_all_map += camera_id * image_height * image_width * ALL_MAP;
+    out_plane_depth += camera_id * image_height * image_width;
+
     last_ids += camera_id * image_height * image_width;
     if (backgrounds != nullptr) {
         backgrounds += camera_id * COLOR_DIM;
@@ -60,6 +78,7 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     S px = (S)j + 0.5f;
     S py = (S)i + 0.5f;
     int32_t pix_id = i * image_width + j;
+    const vec2<S> ray = { (px - cx) / focal_x, (py - cy) / focal_y };
 
     // return if out of bounds
     // keep not rasterizing threads around for reading data
@@ -110,6 +129,9 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     uint32_t tr = block.thread_rank();
 
     S pix_out[COLOR_DIM] = {0.f};
+    S all_map_out[ALL_MAP] = {0.f};
+    int out_observe_out = 0;
+
     for (uint32_t b = 0; b < num_batches; ++b) {
         // resync all threads before beginning next batch
         // end early if entire tile is done
@@ -161,6 +183,18 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
             for (uint32_t k = 0; k < COLOR_DIM; ++k) {
                 pix_out[k] += c_ptr[k] * vis;
             }
+
+            if (render_geo) {
+                const S *all_map_ptr = all_map + g * ALL_MAP;
+                for (int ch = 0; ch < ALL_MAP; ch++)
+                    all_map_out[ch] += all_map_ptr[ch] * alpha * T;
+            }
+
+            if (T > 0.5)
+            {
+                out_observe_out++;
+            }
+
             cur_idx = batch_start + t;
 
             T = next_T;
@@ -182,11 +216,19 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
         }
         // index in bin of last gaussian in this pixel
         last_ids[pix_id] = static_cast<int32_t>(cur_idx);
+
+        out_observe[pix_id] = out_observe_out;
+
+        if (render_geo) {
+            for (int ch = 0; ch < ALL_MAP; ch++)
+                out_all_map[pix_id * ALL_MAP + ch] = all_map_out[ch];
+            out_plane_depth[pix_id] = all_map_out[4] / -(all_map_out[0] * ray.x + all_map_out[1] * ray.y + all_map_out[2] + 1.0e-8);
+        }
     }
 }
 
-template <uint32_t CDIM>
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
+template <uint32_t CDIM, uint32_t ALL_MAP>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
     const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
@@ -194,13 +236,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     const torch::Tensor &opacities, // [C, N]  or [nnz]
     const at::optional<torch::Tensor> &backgrounds, // [C, channels]
     const at::optional<torch::Tensor> &masks, // [C, tile_height, tile_width]
+    const torch::Tensor &all_map,    // [C, N, ALL_MAP]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
+    const float focal_x,
+    const float focal_y,
+    const float cx,
+    const float cy,
     // intersections
     const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
-    const torch::Tensor &flatten_ids   // [n_isects]
+    const torch::Tensor &flatten_ids,   // [n_isects]
+    // options
+    bool render_geo
 ) {
     GSPLAT_DEVICE_GUARD(means2d);
     GSPLAT_CHECK_INPUT(means2d);
@@ -240,6 +289,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     torch::Tensor last_ids = torch::empty(
         {C, image_height, image_width}, means2d.options().dtype(torch::kInt32)
     );
+    torch::Tensor observe = torch::empty(
+            {C, image_height, image_width}, means2d.options().dtype(torch::kInt32)
+    );
+    torch::Tensor depths = torch::empty(
+            {C, image_height, image_width, 1},
+            means2d.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor out_all_map = torch::empty(
+            {C, image_height, image_width, ALL_MAP},
+            means2d.options().dtype(torch::kFloat32)
+    );
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     const uint32_t shared_mem =
@@ -250,7 +310,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
     // channels into the kernel functions and avoid necessary global memory
     // writes. This requires moving the channel padding from python to C side.
     if (cudaFuncSetAttribute(
-            rasterize_to_pixels_pgsr_fwd_kernel<CDIM, float>,
+            rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, float>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             shared_mem
         ) != cudaSuccess) {
@@ -260,7 +320,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
             " bytes), try lowering tile_size."
         );
     }
-    rasterize_to_pixels_pgsr_fwd_kernel<CDIM, float>
+    rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, float>
         <<<blocks, threads, shared_mem, stream>>>(
             C,
             N,
@@ -273,6 +333,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
             backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
                                     : nullptr,
             masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
+            focal_x, focal_y,
+            cx, cy,
+            all_map.data_ptr<float>(),
             image_width,
             image_height,
             tile_size,
@@ -282,13 +345,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> call_kernel_with_dim(
             flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(),
             alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>()
+            last_ids.data_ptr<int32_t>(),
+            observe.data_ptr<int32_t>(),
+            out_all_map.data_ptr<float>(),
+            depths.data_ptr<float>(),
+            render_geo
         );
 
-    return std::make_tuple(renders, alphas, last_ids);
+    return std::make_tuple(renders, alphas, last_ids, observe, out_all_map, depths);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_to_pixels_pgsr_fwd_tensor(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
@@ -297,31 +364,44 @@ rasterize_to_pixels_pgsr_fwd_tensor(
     const torch::Tensor &opacities, // [C, N]  or [nnz]
     const at::optional<torch::Tensor> &backgrounds, // [C, channels]
     const at::optional<torch::Tensor> &masks, // [C, tile_height, tile_width]
+    const torch::Tensor &all_map,    // [C, N, ALL_MAP]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
+    const float focal_x,
+    const float focal_y,
+    const float cx,
+    const float cy,
     // intersections
     const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
-    const torch::Tensor &flatten_ids   // [n_isects]
+    const torch::Tensor &flatten_ids,   // [n_isects]
+    // options
+    bool render_geo
 ) {
     GSPLAT_CHECK_INPUT(colors);
     uint32_t channels = colors.size(-1);
 
 #define __GS__CALL_(N)                                                         \
     case N:                                                                    \
-        return call_kernel_with_dim<N>(                                        \
+        return call_kernel_with_dim<N, ALL_MAP_VAL>(                           \
             means2d,                                                           \
             conics,                                                            \
             colors,                                                            \
             opacities,                                                         \
             backgrounds,                                                       \
             masks,                                                             \
+            all_map,                                                           \
             image_width,                                                       \
             image_height,                                                      \
             tile_size,                                                         \
+            focal_x,                                                           \
+            focal_y,                                                           \
+            cx,                                                                \
+            cy,                                                                \
             tile_offsets,                                                      \
-            flatten_ids                                                        \
+            flatten_ids,                                                       \
+            render_geo                                                         \
         );
 
     // TODO: an optimization can be done by passing the actual number of

@@ -84,6 +84,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def(
+    "rasterize_to_pixels_pgsr_fwd",
+    &gsplat::rasterize_to_pixels_pgsr_fwd_tensor
+    );
+    m.def(
+    "rasterize_to_pixels_pgsr_bwd",
+    &gsplat::rasterize_to_pixels_pgsr_bwd_tensor
+    );
+
+    m.def(
         "rasterize_to_indices_in_range_2dgs",
         &gsplat::rasterize_to_indices_in_range_2dgs_tensor
     );
