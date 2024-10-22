@@ -67,13 +67,31 @@ __global__ void fully_fused_projection_fwd_kernel(
     );
     vec3<T> t = vec3<T>(viewmats[3], viewmats[7], viewmats[11]);
 
+//    printf("Transformation matrix: \n");
+//    printf("%f %f %f\n", R[0][0], R[0][1], R[0][2]);
+//    printf("%f %f %f\n", R[1][0], R[1][1], R[1][2]);
+//    printf("%f %f %f\n", R[2][0], R[2][1], R[2][2]);
+//    printf("Translation vector: \n");
+//    printf("%f %f %f\n", t[0], t[1], t[2]);
+//    printf("Mean: \n");
+//    printf("%f %f %f\n", means[0], means[1], means[2]);
+
     // transform Gaussian center to camera space
     vec3<T> mean_c;
     pos_world_to_cam(R, t, glm::make_vec3(means), mean_c);
+
+//    printf("Mean in camera space: \n");
+//    printf("%f %f %f\n", mean_c[0], mean_c[1], mean_c[2]);
+
     if (mean_c.z < near_plane || mean_c.z > far_plane) {
         radii[idx] = 0;
+//        printf(" RADIUS CLIP: %f (near %f far %f) \n", mean_c.z, near_plane, far_plane);
         return;
     }
+
+//    printf("Original point: %f %f %f\n", means[0], means[1], means[2]);
+//    printf("Mean in camera space: %f %f %f\n", mean_c[0], mean_c[1], mean_c[2]);
+//    printf("Depth: %f\n", mean_c.z);
 
     // transform Gaussian covariance to camera space
     mat3<T> covar;

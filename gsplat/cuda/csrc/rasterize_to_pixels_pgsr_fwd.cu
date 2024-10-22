@@ -28,8 +28,8 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     const S *__restrict__ backgrounds, // [C, COLOR_DIM]
     const bool *__restrict__ masks,    // [C, tile_height, tile_width]
     // PGSR parameters
-    const S focal_x, const float focal_y,
-    const S cx, const float cy,
+    const float focal_x, const float focal_y,
+    const float cx, const float cy,
 //    const S* __restrict__ viewmatrix,
 //    const S* __restrict__ cam_pos,
     const S* __restrict__ all_map,
@@ -110,9 +110,9 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
     extern __shared__ int s[];
     int32_t *id_batch = (int32_t *)s; // [block_size]
     vec3<S> *xy_opacity_batch =
-        reinterpret_cast<vec3<float> *>(&id_batch[block_size]); // [block_size]
+        reinterpret_cast<vec3<S> *>(&id_batch[block_size]); // [block_size]
     vec3<S> *conic_batch =
-        reinterpret_cast<vec3<float> *>(&xy_opacity_batch[block_size]
+        reinterpret_cast<vec3<S> *>(&xy_opacity_batch[block_size]
         ); // [block_size]
 
     // current visibility left to render
@@ -186,8 +186,9 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
 
             if (render_geo) {
                 const S *all_map_ptr = all_map + g * ALL_MAP;
+                GSPLAT_PRAGMA_UNROLL
                 for (int ch = 0; ch < ALL_MAP; ch++)
-                    all_map_out[ch] += all_map_ptr[ch] * alpha * T;
+                    all_map_out[ch] += all_map_ptr[ch] * vis;
             }
 
             if (T > 0.5)
@@ -220,6 +221,7 @@ __global__ void rasterize_to_pixels_pgsr_fwd_kernel(
         out_observe[pix_id] = out_observe_out;
 
         if (render_geo) {
+            GSPLAT_PRAGMA_UNROLL
             for (int ch = 0; ch < ALL_MAP; ch++)
                 out_all_map[pix_id * ALL_MAP + ch] = all_map_out[ch];
             out_plane_depth[pix_id] = all_map_out[4] / -(all_map_out[0] * ray.x + all_map_out[1] * ray.y + all_map_out[2] + 1.0e-8);
@@ -280,11 +282,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 
     torch::Tensor renders = torch::empty(
         {C, image_height, image_width, channels},
-        means2d.options().dtype(torch::kFloat32)
+        means2d.options()
     );
     torch::Tensor alphas = torch::empty(
         {C, image_height, image_width, 1},
-        means2d.options().dtype(torch::kFloat32)
+        means2d.options()
     );
     torch::Tensor last_ids = torch::empty(
         {C, image_height, image_width}, means2d.options().dtype(torch::kInt32)
@@ -294,63 +296,118 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     );
     torch::Tensor depths = torch::empty(
             {C, image_height, image_width, 1},
-            means2d.options().dtype(torch::kFloat32)
+            means2d.options()
     );
     torch::Tensor out_all_map = torch::empty(
             {C, image_height, image_width, ALL_MAP},
-            means2d.options().dtype(torch::kFloat32)
+            means2d.options()
     );
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
-    const uint32_t shared_mem =
-        tile_size * tile_size *
-        (sizeof(int32_t) + sizeof(vec3<float>) + sizeof(vec3<float>));
 
-    // TODO: an optimization can be done by passing the actual number of
-    // channels into the kernel functions and avoid necessary global memory
-    // writes. This requires moving the channel padding from python to C side.
-    if (cudaFuncSetAttribute(
-            rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, float>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            shared_mem
+    if (means2d.scalar_type() == torch::kFloat32) {
+        const uint32_t shared_mem =
+                tile_size * tile_size *
+                (sizeof(int32_t) + sizeof(vec3 < float > ) + sizeof(vec3 < float > ));
+
+        // TODO: an optimization can be done by passing the actual number of
+        // channels into the kernel functions and avoid necessary global memory
+        // writes. This requires moving the channel padding from python to C side.
+        if (cudaFuncSetAttribute(
+                rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, float>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                shared_mem
         ) != cudaSuccess) {
-        AT_ERROR(
-            "Failed to set maximum shared memory size (requested ",
-            shared_mem,
-            " bytes), try lowering tile_size."
-        );
-    }
-    rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, float>
+            AT_ERROR(
+                    "Failed to set maximum shared memory size (requested ",
+                    shared_mem,
+                    " bytes), try lowering tile_size."
+            );
+        }
+        rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, float>
         <<<blocks, threads, shared_mem, stream>>>(
-            C,
-            N,
-            n_isects,
-            packed,
-            reinterpret_cast<vec2<float> *>(means2d.data_ptr<float>()),
-            reinterpret_cast<vec3<float> *>(conics.data_ptr<float>()),
-            colors.data_ptr<float>(),
-            opacities.data_ptr<float>(),
-            backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
-                                    : nullptr,
-            masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
-            focal_x, focal_y,
-            cx, cy,
-            all_map.data_ptr<float>(),
-            image_width,
-            image_height,
-            tile_size,
-            tile_width,
-            tile_height,
-            tile_offsets.data_ptr<int32_t>(),
-            flatten_ids.data_ptr<int32_t>(),
-            renders.data_ptr<float>(),
-            alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>(),
-            observe.data_ptr<int32_t>(),
-            out_all_map.data_ptr<float>(),
-            depths.data_ptr<float>(),
-            render_geo
+                C,
+                N,
+                n_isects,
+                packed,
+                reinterpret_cast<vec2<float> *>(means2d.data_ptr<float>()),
+                reinterpret_cast<vec3<float> *>(conics.data_ptr<float>()),
+                colors.data_ptr<float>(),
+                opacities.data_ptr<float>(),
+                backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
+                                        : nullptr,
+                masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
+                focal_x, focal_y,
+                cx, cy,
+                all_map.data_ptr<float>(),
+                image_width,
+                image_height,
+                tile_size,
+                tile_width,
+                tile_height,
+                tile_offsets.data_ptr<int32_t>(),
+                flatten_ids.data_ptr<int32_t>(),
+                renders.data_ptr<float>(),
+                alphas.data_ptr<float>(),
+                last_ids.data_ptr<int32_t>(),
+                observe.data_ptr<int32_t>(),
+                out_all_map.data_ptr<float>(),
+                depths.data_ptr<float>(),
+                render_geo
         );
+    } else if (means2d.scalar_type() == torch::kFloat64) {
+        const uint32_t shared_mem =
+                tile_size * tile_size *
+                (sizeof(int32_t) + sizeof(vec3 < double > ) + sizeof(vec3 < double > ));
+
+        // TODO: an optimization can be done by passing the actual number of
+        // channels into the kernel functions and avoid necessary global memory
+        // writes. This requires moving the channel padding from python to C side.
+        if (cudaFuncSetAttribute(
+                rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, double>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                shared_mem
+        ) != cudaSuccess) {
+            AT_ERROR(
+                    "Failed to set maximum shared memory size (requested ",
+                    shared_mem,
+                    " bytes), try lowering tile_size."
+            );
+        }
+        rasterize_to_pixels_pgsr_fwd_kernel<CDIM, ALL_MAP, double>
+        <<<blocks, threads, shared_mem, stream>>>(
+                C,
+                N,
+                n_isects,
+                packed,
+                reinterpret_cast<vec2<double> *>(means2d.data_ptr<double>()),
+                reinterpret_cast<vec3<double> *>(conics.data_ptr<double>()),
+                colors.data_ptr<double>(),
+                opacities.data_ptr<double>(),
+                backgrounds.has_value() ? backgrounds.value().data_ptr<double>()
+                                        : nullptr,
+                masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
+                focal_x, focal_y,
+                cx, cy,
+                all_map.data_ptr<double>(),
+                image_width,
+                image_height,
+                tile_size,
+                tile_width,
+                tile_height,
+                tile_offsets.data_ptr<int32_t>(),
+                flatten_ids.data_ptr<int32_t>(),
+                renders.data_ptr<double>(),
+                alphas.data_ptr<double>(),
+                last_ids.data_ptr<int32_t>(),
+                observe.data_ptr<int32_t>(),
+                out_all_map.data_ptr<double>(),
+                depths.data_ptr<double>(),
+                render_geo
+        );
+    } else {
+        AT_ERROR("Unsupported scalar type: ", means2d.scalar_type());
+    }
 
     return std::make_tuple(renders, alphas, last_ids, observe, out_all_map, depths);
 }

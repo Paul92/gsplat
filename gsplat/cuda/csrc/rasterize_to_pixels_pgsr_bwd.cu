@@ -110,9 +110,9 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
     extern __shared__ int s[];
     int32_t *id_batch = (int32_t *)s; // [block_size]
     vec3<S> *xy_opacity_batch =
-        reinterpret_cast<vec3<float> *>(&id_batch[block_size]); // [block_size]
+        reinterpret_cast<vec3<S> *>(&id_batch[block_size]); // [block_size]
     vec3<S> *conic_batch =
-        reinterpret_cast<vec3<float> *>(&xy_opacity_batch[block_size]
+        reinterpret_cast<vec3<S> *>(&xy_opacity_batch[block_size]
         );                                         // [block_size]
     S *rgbs_batch = (S *)&conic_batch[block_size]; // [block_size * COLOR_DIM]
     S *all_maps_batch = (S *)&rgbs_batch[block_size * COLOR_DIM];
@@ -136,13 +136,16 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
     S v_all_map[MAP_N] = {0.f};
     if(render_geo) {
         for (int i = 0; i < MAP_N; i++) {
-//            printf("pix_id: %d, i: %d, vector idx %d, value %f\n", pix_id, i, pix_id * MAP_N + i, all_map_pixels[pix_id * MAP_N + i]);
-            v_all_map[i] = v_render_all_maps[i + pix_id * MAP_N];
+            v_all_map[i] = v_render_all_maps[pix_id * MAP_N + i];
         }
         const uint32_t image_size = image_width * image_height;
-        const float3 normal = {all_map_pixels[pix_id], all_map_pixels[image_size + pix_id], all_map_pixels[2 * image_size + pix_id]};
-        const float distance = all_map_pixels[4 * image_size + pix_id];
-        const float tmp = (normal.x * ray.x + normal.y * ray.y + normal.z + 1.0e-8);
+//        const vec3<S> normal = {all_map_pixels[pix_id], all_map_pixels[image_size + pix_id], all_map_pixels[2 * image_size + pix_id]};
+        const vec3<S> normal = {all_map_pixels[pix_id*MAP_N],
+                                all_map_pixels[pix_id*MAP_N+1],
+                                all_map_pixels[pix_id*MAP_N+2]};
+
+        const S distance = all_map_pixels[4 * image_size + pix_id];
+        const S tmp = (normal.x * ray.x + normal.y * ray.y + normal.z + 1.0e-8);
         v_all_map[MAP_N-1] += (-v_render_depths[pix_id] / tmp);
         v_all_map[0] += v_render_depths[pix_id] * (distance / (tmp * tmp) * ray.x);
         v_all_map[1] += v_render_depths[pix_id] * (distance / (tmp * tmp) * ray.y);
@@ -188,7 +191,6 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
         S last_alpha = 0;
         S accum_all_map[MAP_N] = {0.f};
         S last_all_map[MAP_N] = {0.f};
-
 
         // wait for other threads to collect the gaussians in batch
         block.sync();
@@ -282,7 +284,6 @@ __global__ void rasterize_to_pixels_pgsr_bwd_kernel(
                         v_all_map_local[ch] = fac * v_all_map[ch];
                     }
                 }
-
 
                 if (opac * vis <= 0.999f) {
                     const S v_sigma = -opac * vis * v_alpha;
@@ -440,63 +441,127 @@ call_kernel_with_dim(
     }
 
     if (n_isects) {
-        const uint32_t shared_mem =
-            tile_size * tile_size *
-            (sizeof(int32_t) + sizeof(vec3<float>) + sizeof(vec3<float>) +
-             sizeof(float) * COLOR_DIM + sizeof(float) * MAP_N);
-        at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+        if (means2d.dtype() == torch::kFloat32) {
+            const uint32_t shared_mem =
+                    tile_size * tile_size *
+                    (sizeof(int32_t) + sizeof(vec3<float>) + sizeof(vec3<float>) +
+                     sizeof(float) * COLOR_DIM + sizeof(float) * MAP_N);
+            at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
-        if (cudaFuncSetAttribute(
-                rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, float>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                shared_mem
+            if (cudaFuncSetAttribute(
+                    rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, float>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    shared_mem
             ) != cudaSuccess) {
-            AT_ERROR(
-                "Failed to set maximum shared memory size (requested ",
-                shared_mem,
-                " bytes), try lowering tile_size."
+                AT_ERROR(
+                        "Failed to set maximum shared memory size (requested ",
+                        shared_mem,
+                        " bytes), try lowering tile_size."
+                );
+            }
+
+
+            rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, float>
+            <<<blocks, threads, shared_mem, stream>>>(
+                    C,
+                    N,
+                    n_isects,
+                    packed,
+                    reinterpret_cast<vec2<float> *>(means2d.data_ptr<float>()),
+                    reinterpret_cast<vec3<float> *>(conics.data_ptr<float>()),
+                    colors.data_ptr<float>(),
+                    opacities.data_ptr<float>(),
+                    backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
+                                            : nullptr,
+                    masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
+                    image_width,
+                    image_height,
+                    fx, fy,
+                    tile_size,
+                    tile_width,
+                    tile_height,
+                    tile_offsets.data_ptr<int32_t>(),
+                    flatten_ids.data_ptr<int32_t>(),
+                    render_alphas.data_ptr<float>(),
+                    last_ids.data_ptr<int32_t>(),
+                    all_maps.data_ptr<float>(),
+                    all_map_pixels.data_ptr<float>(),
+                    v_render_colors.data_ptr<float>(),
+                    v_render_alphas.data_ptr<float>(),
+                    v_render_all_maps.data_ptr<float>(),
+                    v_render_depths.data_ptr<float>(),
+                    absgrad ? reinterpret_cast<vec2<float> *>(
+                            v_means2d_abs.data_ptr<float>()
+                    )
+                            : nullptr,
+                    reinterpret_cast<vec2<float> *>(v_means2d.data_ptr<float>()),
+                    reinterpret_cast<vec3<float> *>(v_conics.data_ptr<float>()),
+                    v_colors.data_ptr<float>(),
+                    v_opacities.data_ptr<float>(),
+                    v_all_maps.data_ptr<float>(),
+                    render_geo
+            );
+        } else if (means2d.dtype() == torch::kFloat64) {
+            const uint32_t shared_mem =
+                    tile_size * tile_size *
+                    (sizeof(int32_t) + sizeof(vec3<double>) + sizeof(vec3<double>) +
+                     sizeof(double) * COLOR_DIM + sizeof(double) * MAP_N);
+            at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+
+            if (cudaFuncSetAttribute(
+                    rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, double>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    shared_mem
+            ) != cudaSuccess) {
+                AT_ERROR(
+                        "Failed to set maximum shared memory size (requested ",
+                        shared_mem,
+                        " bytes), try lowering tile_size."
+                );
+            }
+
+
+            rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, double>
+            <<<blocks, threads, shared_mem, stream>>>(
+                    C,
+                    N,
+                    n_isects,
+                    packed,
+                    reinterpret_cast<vec2<double> *>(means2d.data_ptr<double>()),
+                    reinterpret_cast<vec3<double> *>(conics.data_ptr<double>()),
+                    colors.data_ptr<double>(),
+                    opacities.data_ptr<double>(),
+                    backgrounds.has_value() ? backgrounds.value().data_ptr<double>()
+                                            : nullptr,
+                    masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
+                    image_width,
+                    image_height,
+                    fx, fy,
+                    tile_size,
+                    tile_width,
+                    tile_height,
+                    tile_offsets.data_ptr<int32_t>(),
+                    flatten_ids.data_ptr<int32_t>(),
+                    render_alphas.data_ptr<double>(),
+                    last_ids.data_ptr<int32_t>(),
+                    all_maps.data_ptr<double>(),
+                    all_map_pixels.data_ptr<double>(),
+                    v_render_colors.data_ptr<double>(),
+                    v_render_alphas.data_ptr<double>(),
+                    v_render_all_maps.data_ptr<double>(),
+                    v_render_depths.data_ptr<double>(),
+                    absgrad ? reinterpret_cast<vec2<double> *>(
+                            v_means2d_abs.data_ptr<double>()
+                    )
+                            : nullptr,
+                    reinterpret_cast<vec2<double> *>(v_means2d.data_ptr<double>()),
+                    reinterpret_cast<vec3<double> *>(v_conics.data_ptr<double>()),
+                    v_colors.data_ptr<double>(),
+                    v_opacities.data_ptr<double>(),
+                    v_all_maps.data_ptr<double>(),
+                    render_geo
             );
         }
-        rasterize_to_pixels_pgsr_bwd_kernel<CDIM, MAP_N, float>
-            <<<blocks, threads, shared_mem, stream>>>(
-                C,
-                N,
-                n_isects,
-                packed,
-                reinterpret_cast<vec2<float> *>(means2d.data_ptr<float>()),
-                reinterpret_cast<vec3<float> *>(conics.data_ptr<float>()),
-                colors.data_ptr<float>(),
-                opacities.data_ptr<float>(),
-                backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
-                                        : nullptr,
-                masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
-                image_width,
-                image_height,
-                fx, fy,
-                tile_size,
-                tile_width,
-                tile_height,
-                tile_offsets.data_ptr<int32_t>(),
-                flatten_ids.data_ptr<int32_t>(),
-                render_alphas.data_ptr<float>(),
-                last_ids.data_ptr<int32_t>(),
-                all_maps.data_ptr<float>(),
-                all_map_pixels.data_ptr<float>(),
-                v_render_colors.data_ptr<float>(),
-                v_render_alphas.data_ptr<float>(),
-                v_render_all_maps.data_ptr<float>(),
-                v_render_depths.data_ptr<float>(),
-                absgrad ? reinterpret_cast<vec2<float> *>(
-                              v_means2d_abs.data_ptr<float>()
-                          )
-                        : nullptr,
-                reinterpret_cast<vec2<float> *>(v_means2d.data_ptr<float>()),
-                reinterpret_cast<vec3<float> *>(v_conics.data_ptr<float>()),
-                v_colors.data_ptr<float>(),
-                v_opacities.data_ptr<float>(),
-                v_all_maps.data_ptr<float>(),
-                render_geo
-            );
     }
 
     return std::make_tuple(
