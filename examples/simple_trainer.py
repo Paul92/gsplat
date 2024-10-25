@@ -1088,7 +1088,7 @@ class Runner:
             image_name = os.path.join('images', os.path.basename(self.parser.image_paths[ID]))
             dmap = {}
             dmap['depth_map'] = depths.cpu().numpy()
-            dmap['normal_map'] = normals.cpu().numpy()
+            # dmap['normal_map'] = normals.cpu().numpy()
             dmap['file_name'] = image_name
             dmap['reference_view_id'] = ID
             dmap['neighbor_view_ids'] = []
@@ -1098,7 +1098,7 @@ class Runner:
             dmap['depth_height'] = height
             dmap['depth_min'] = depths.min().cpu().numpy()
             dmap['depth_max'] = depths.max().cpu().numpy()
-            dmap['K'] = data["K"].cpu().numpy()[0, :, :]
+            dmap['K'] = Ks.cpu().numpy()[0, :, :]
             dmap['R'] = worldtocam[:3, :3]
             dmap['C'] = worldtocam[:3, :3].T @ -worldtocam[:3, 3]
             saveDMAP(dmap, f"{self.mvs_dir}/depth{ID:04d}.dmap")
@@ -1116,7 +1116,7 @@ class Runner:
             camera['name'] = f'camera_{ID}'
             camera['width'] = width
             camera['height'] = height
-            camera['K'] = data["K"].cpu().numpy()[0, :, :].tolist()
+            camera['K'] = dmap['K'].tolist()
             camera['R'] = np.eye(3, dtype=np.float32).tolist()
             camera['C'] = np.zeros(3, dtype=np.float32).tolist()
             pose = {
@@ -1261,6 +1261,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         step = ckpts[0]["step"]
+        runner.render_geometry = step >= cfg.render_geometry_start
         runner.eval(step=step)
         runner.render_traj(step=step)
         runner.export_depthmaps()
