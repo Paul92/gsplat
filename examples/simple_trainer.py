@@ -38,7 +38,7 @@ from lib_bilagrid import (
 )
 from MvsUtils import saveDMAP, saveMVSInterface
 
-from gsplat.utils import depth_to_normal
+from gsplat.utils import depth_to_normal, get_image_grad_weight
 from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization, rasterization_radegs, rasterization_rade_inria_wrapper
@@ -747,14 +747,13 @@ class Runner:
                 loss += tvloss
 
             if cfg.normal_loss and step > cfg.normal_start_iter:
-                curr_normal_lambda = cfg.normal_lambda
-                viewmats = torch.linalg.inv(camtoworlds)
                 if True:
+                    # viewmats = torch.linalg.inv(camtoworlds)
                     # normals_from_depth = depth_to_normal(
                     #     info['render_depths'], torch.linalg.inv(viewmats), Ks
                     # ).squeeze(0)
                     normals_from_depth = depth_to_normal(
-                        info['render_depths'], torch.eye(4,4).to(device=viewmats.device).unsqueeze(0), Ks
+                        info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
                     ).squeeze(0)
                 else:
                     normals_from_depth = info['normals_from_depth']
@@ -765,8 +764,11 @@ class Runner:
                 #     normals_from_depth = normals_from_depth.squeeze(0)
                 if cfg.rasterization_method == "radegs_inria":
                     normals_from_depth = normals_from_depth.permute((2, 0, 1))
-                normal_error = (1 - (normals * normals_from_depth).sum(dim=0))[None]
-                normalloss = curr_normal_lambda * normal_error.mean()
+                normal_error = 1.0 - torch.sum(normals * normals_from_depth, dim=-1, keepdim=True)
+                image_weight = 1.0 - get_image_grad_weight(pixels).squeeze(0)
+                image_weight = image_weight.clamp(0,1).detach() ** 2
+                wighted_normal_error = image_weight * normal_error
+                normalloss = cfg.normal_lambda * wighted_normal_error.mean()
                 loss += normalloss
 
             # regularizations
