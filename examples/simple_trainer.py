@@ -1088,7 +1088,7 @@ class Runner:
             image_name = os.path.join('images', os.path.basename(self.parser.image_paths[ID]))
             dmap = {}
             dmap['depth_map'] = depths.cpu().numpy()
-            dmap['normal_map'] = normals.cpu().numpy()
+            # dmap['normal_map'] = normals.cpu().numpy()
             dmap['file_name'] = image_name
             dmap['reference_view_id'] = ID
             dmap['neighbor_view_ids'] = []
@@ -1261,6 +1261,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         step = ckpts[0]["step"]
+        runner.render_geometry = step >= cfg.render_geometry_start
         runner.eval(step=step)
         runner.render_traj(step=step)
         runner.export_depthmaps()
