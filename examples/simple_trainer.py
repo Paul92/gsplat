@@ -748,9 +748,8 @@ class Runner:
 
             if cfg.normal_loss and step > cfg.normal_start_iter:
                 if True:
-                    # viewmats = torch.linalg.inv(camtoworlds)
                     # normals_from_depth = depth_to_normal(
-                    #     info['render_depths'], torch.linalg.inv(viewmats), Ks
+                    #     info['render_depths'], camtoworlds, Ks
                     # ).squeeze(0)
                     normals_from_depth = depth_to_normal(
                         info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
@@ -1076,15 +1075,14 @@ class Runner:
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
-            colors, depths = renders[..., 0:3], renders[..., 3:4]
-            colors = torch.clamp(colors, 0.0, 1.0)
+            depths = renders[..., 3:4]
             if self.cfg.rasterization_method == "gs3d" or self.cfg.rasterization_method == "radegs":
                 depths = info['render_depths'][0].detach()
                 normals = info['render_normals'][0].detach()
 
             # write DMAP
             ID = indices[i]
-            worldtocam = np.linalg.inv(data["camtoworld"].cpu().numpy()[0, :, :])
+            worldtocam = np.linalg.inv(camtoworlds.cpu().numpy()[0, :, :])
             image_name = os.path.join('images', os.path.basename(self.parser.image_paths[ID]))
             dmap = {}
             dmap['depth_map'] = depths.cpu().numpy()
@@ -1132,6 +1130,7 @@ class Runner:
 
         saveMVSInterface(scene, f"{self.mvs_dir}/scene.mvs")
         ellipse_time /= len(valloader)
+        print(f"... done: {ellipse_time:.3f}s/image")
 
     @torch.no_grad()
     def render_traj(self, step: int):
