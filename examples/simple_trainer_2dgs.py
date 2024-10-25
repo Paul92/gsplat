@@ -921,20 +921,20 @@ class Runner:
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
             )  # [1, H, W, 3]
-            colors = torch.clamp(colors, 0.0, 1.0)
-            colors = colors[..., :3]  # Take RGB channels
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
+            depths = render_median
+            normals = normals_from_depth * alphas.squeeze(0).detach()
+            normals = F.normalize(normals, p=2, dim=-1)
+
             # write DMAP
             ID = indices[i]
-            worldtocam = np.linalg.inv(data["camtoworld"].cpu().numpy()[0, :, :])
-            cam_normals = normals_from_depth * alphas.squeeze(0).detach()
-            cam_normals = F.normalize(cam_normals, p=2, dim=-1)
+            worldtocam = np.linalg.inv(camtoworlds.cpu().numpy()[0, :, :])
             image_name = os.path.join('images', os.path.basename(self.parser.image_paths[ID]))
             dmap = {}
-            dmap['depth_map'] = render_median.cpu().numpy()
-            # dmap['normal_map'] = cam_normals.cpu().numpy()
+            dmap['depth_map'] = depths.cpu().numpy()
+            # dmap['normal_map'] = normals.cpu().numpy()
             dmap['file_name'] = image_name
             dmap['reference_view_id'] = ID
             dmap['neighbor_view_ids'] = []
@@ -942,9 +942,9 @@ class Runner:
             dmap['image_height'] = height
             dmap['depth_width'] = width
             dmap['depth_height'] = height
-            dmap['depth_min'] = render_median.min().cpu().numpy()
-            dmap['depth_max'] = render_median.max().cpu().numpy()
-            dmap['K'] = data["K"].cpu().numpy()[0, :, :]
+            dmap['depth_min'] = depths.min().cpu().numpy()
+            dmap['depth_max'] = depths.max().cpu().numpy()
+            dmap['K'] = Ks.cpu().numpy()[0, :, :]
             dmap['R'] = worldtocam[:3, :3]
             dmap['C'] = worldtocam[:3, :3].T @ -worldtocam[:3, 3]
             saveDMAP(dmap, f"{self.mvs_dir}/depth{ID:04d}.dmap")
@@ -962,7 +962,7 @@ class Runner:
             camera['name'] = f'camera_{ID}'
             camera['width'] = width
             camera['height'] = height
-            camera['K'] = data["K"].cpu().numpy()[0, :, :].tolist()
+            camera['K'] = dmap['K'].tolist()
             camera['R'] = np.eye(3, dtype=np.float32).tolist()
             camera['C'] = np.zeros(3, dtype=np.float32).tolist()
             pose = {
@@ -978,6 +978,7 @@ class Runner:
 
         saveMVSInterface(scene, f"{self.mvs_dir}/scene.mvs")
         ellipse_time /= len(valloader)
+        print(f"... done: {ellipse_time:.3f}s/image")
 
     @torch.no_grad()
     def render_traj(self, step: int):
