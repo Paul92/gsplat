@@ -171,7 +171,7 @@ class Config:
     # Enable normal consistency loss. (Currently for RaDe-GS only)
     normal_loss: bool = True
     # Weight for normal loss
-    normal_lambda: float = 5e-2
+    normal_lambda: float = 2e-2
     # Iteration to start normal consistency regulerization
     normal_start_iter: int = 7_000
 
@@ -763,9 +763,12 @@ class Runner:
                 #     normals_from_depth = normals_from_depth.squeeze(0)
                 if cfg.rasterization_method == "radegs_inria":
                     normals_from_depth = normals_from_depth.permute((2, 0, 1))
-                normal_error = 1.0 - torch.sum(normals * normals_from_depth, dim=-1, keepdim=True)
                 image_weight = 1.0 - get_image_grad_weight(pixels).squeeze(0)
                 image_weight = image_weight.clamp(0,1).detach() ** 2
+                if True:
+                    normal_error = image_weight * torch.sum((normals_from_depth - normals).abs(), dim=-1, keepdim=True)
+                else:
+                    normal_error = 1.0 - torch.sum(normals * normals_from_depth, dim=-1, keepdim=True)
                 wighted_normal_error = image_weight * normal_error
                 normalloss = cfg.normal_lambda * wighted_normal_error.mean()
                 loss += normalloss
