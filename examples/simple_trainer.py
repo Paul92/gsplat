@@ -107,9 +107,9 @@ class Config:
     ssim_lambda: float = 0.2
 
     # Near plane clipping distance
-    near_plane: float = 0.01
+    near_plane: float = 0.03
     # Far plane clipping distance
-    far_plane: float = 1e10
+    far_plane: float = 1e3
 
     # Strategy for GS densification
     strategy: Union[DefaultStrategy, MCMCStrategy] = field(
@@ -128,7 +128,9 @@ class Config:
     random_bkgd: bool = False
 
     # Opacity regularization
-    opacity_reg: float = 0.0
+    opacity_reg: float = 0.0 # 3e-6
+    # Opacity regularization end step
+    opacity_reg_end: int = 15_000
     # Scale regularization
     scale_reg: float = 0.0
 
@@ -774,7 +776,7 @@ class Runner:
                 loss += normalloss
 
             # regularizations
-            if cfg.opacity_reg > 0.0:
+            if cfg.opacity_reg > 0.0 and step < cfg.opacity_reg_end:
                 loss = (
                     loss
                     + cfg.opacity_reg
