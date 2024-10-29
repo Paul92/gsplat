@@ -147,7 +147,8 @@ class DefaultStrategy(Strategy):
         assert (
             self.key_for_gradient in info
         ), "The 2D means of the Gaussians is required but missing."
-        info[self.key_for_gradient].retain_grad()
+        if info[self.key_for_gradient].requires_grad:
+            info[self.key_for_gradient].retain_grad()
 
     def step_post_backward(
         self,
