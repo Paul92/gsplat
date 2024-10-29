@@ -793,7 +793,7 @@ class Runner:
             # torch.autograd.set_detect_anomaly(True) # slow down training
             loss.backward()
 
-            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
+            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| " f"num splats={len(self.splats['means'])}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
             if cfg.pose_opt and cfg.pose_noise:
