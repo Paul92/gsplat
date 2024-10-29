@@ -496,85 +496,31 @@ class Runner:
             colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
-        if self.cfg.rasterization_method == "gs3d":
-            render_colors, render_alphas, info = rasterization(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=colors,
-                viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-                Ks=Ks,  # [C, 3, 3]
-                width=width,
-                height=height,
-                packed=self.cfg.packed,
-                absgrad=(
-                    self.cfg.strategy.absgrad
-                    if isinstance(self.cfg.strategy, DefaultStrategy)
-                    else False
-                ),
-                sparse_grad=self.cfg.sparse_grad,
-                rasterize_mode=rasterize_mode,
-                distributed=self.world_size > 1,
-                render_geo=self.render_geometry,
-                **kwargs,
-            )
-        elif self.cfg.rasterization_method == "radegs":
-            render_colors, render_alphas, render_depths, render_normals, info = rasterization_radegs(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=colors,
-                viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-                Ks=Ks,  # [C, 3, 3]
-                width=width,
-                height=height,
-                packed=self.cfg.packed,
-                absgrad=(
-                    self.cfg.strategy.absgrad
-                    if isinstance(self.cfg.strategy, DefaultStrategy)
-                    else False
-                ),
-                sparse_grad=self.cfg.sparse_grad,
-                rasterize_mode=rasterize_mode,
-                distributed=self.world_size > 1,
-                **kwargs,
-            )
-            info['render_depths'] = render_depths
-            info['render_normals'] = render_normals
-        elif self.cfg.rasterization_method == "radegs_inria":
-            (render_colors, render_alphas), info = rasterization_rade_inria_wrapper(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=colors,
-                viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-                Ks=Ks,
-                width=width,
-                height=height,
-                near_plane=0.01,
-                far_plane=100.0,
-                radius_clip=0.0,
-                eps2d=0.3,
-                sh_degree=None,
-                packed=False,
-                tile_size=16,
-                backgrounds=None,
-                render_mode="RGB",
-                sparse_grad=False,
-                absgrad=False,
-                rasterize_mode="classic",
-                channel_chunk=32,
-                distributed=False,
-                ortho=False,
-                covars=None,
-            )
-            info['render_depths'] = info["depth"]
-            info['render_normals'] = info["normals_rend"]
-        else:
-            raise ValueError(f"Unknown rasterization type: {self.cfg.rasterization_method}. Supported types are 'gs3d' and 'radegs'.")
+        render_colors, render_alphas, info = rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
+            Ks=Ks,  # [C, 3, 3]
+            width=width,
+            height=height,
+            packed=self.cfg.packed,
+            absgrad=(
+                self.cfg.strategy.absgrad
+                if isinstance(self.cfg.strategy, DefaultStrategy)
+                else False
+            ),
+            sparse_grad=self.cfg.sparse_grad,
+            rasterize_mode=rasterize_mode,
+            distributed=self.world_size > 1,
+            render_geo=self.render_geometry,
+            **kwargs,
+        )
+
+        # info['render_depths'] = info["depth"]
+        # info['render_normals'] = info["normals_rend"]
 
         return render_colors, render_alphas, info
 
