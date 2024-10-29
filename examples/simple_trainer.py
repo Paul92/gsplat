@@ -163,7 +163,7 @@ class Config:
     # Enable scale loss. (experimental)
     scale_loss: bool = True
     # Weight for scale loss
-    scale_lambda: float = 1e+2
+    scale_lambda: float = 1e-2
 
     # Enable depth loss. (experimental)
     depth_loss: bool = False
@@ -724,7 +724,7 @@ class Runner:
                 scales = torch.exp(self.splats["scales"])  # [N, 3]
                 sorted_scales, _ = torch.sort(scales, dim=-1)
                 min_scale_loss = sorted_scales[...,0]
-                loss += cfg.depth_lambda * min_scale_loss.mean()
+                loss += cfg.scale_lambda * min_scale_loss.mean()
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
