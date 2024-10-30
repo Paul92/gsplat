@@ -7,12 +7,12 @@ def downsample_images(input_folder, output_folder, scale_factor):
         os.makedirs(output_folder)
 
     for filename in os.listdir(input_folder):
-        if filename.endswith(('.png', '.jpg', '.jpeg')):
+        if filename.endswith(('.JPG', '.jpg', '.jpeg', '.png')):
             img_path = os.path.join(input_folder, filename)
             img = Image.open(img_path)
             new_size = (int(img.width / scale_factor), int(img.height / scale_factor))
             img_resized = img.resize(new_size, Image.LANCZOS)
-            img_resized.save(os.path.join(output_folder, filename))
+            img_resized.save(os.path.join(output_folder, filename), quality=95)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Downsample images in a folder.')
