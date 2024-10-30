@@ -41,7 +41,7 @@ from MvsUtils import saveDMAP, saveMVSInterface
 from gsplat.utils import depth_to_normal, get_image_grad_weight
 from gsplat.compression import PngCompression
 from gsplat.distributed import cli
-from gsplat.rendering import rasterization, rasterization_radegs, rasterization_rade_inria_wrapper
+from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 
@@ -695,28 +695,14 @@ class Runner:
                 loss += tvloss
 
             if cfg.normal_loss and step > cfg.normal_start_iter:
-                if True:
-                    # normals_from_depth = depth_to_normal(
-                    #     info['render_depths'], camtoworlds, Ks
-                    # ).squeeze(0)
-                    normals_from_depth = depth_to_normal(
-                        info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
-                    ).squeeze(0)
-                else:
-                    normals_from_depth = info['normals_from_depth']
+                normals_from_depth = depth_to_normal(
+                    info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
+                ).squeeze(0)
                 # normal consistency loss
                 normals = info['render_normals'].squeeze(0)
-                # normals_from_depth *= alphas.squeeze(0).detach()
-                # if len(normals_from_depth.shape) == 4:
-                #     normals_from_depth = normals_from_depth.squeeze(0)
-                if cfg.rasterization_method == "radegs_inria":
-                    normals_from_depth = normals_from_depth.permute((2, 0, 1))
                 image_weight = 1.0 - get_image_grad_weight(pixels).squeeze(0)
                 image_weight = image_weight.clamp(0,1).detach() ** 2
-                if True:
-                    normal_error = image_weight * torch.sum((normals_from_depth - normals).abs(), dim=-1, keepdim=True)
-                else:
-                    normal_error = 1.0 - torch.sum(normals * normals_from_depth, dim=-1, keepdim=True)
+                normal_error = image_weight * torch.sum((normals_from_depth - normals).abs(), dim=-1, keepdim=True)
                 wighted_normal_error = image_weight * normal_error
                 normalloss = cfg.normal_lambda * wighted_normal_error.mean()
                 loss += normalloss
