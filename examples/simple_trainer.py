@@ -163,7 +163,7 @@ class Config:
     # Enable scale loss. (experimental)
     scale_loss: bool = True
     # Weight for scale loss
-    scale_lambda: float = 1e-2
+    scale_lambda: float = 1e+2
 
     # Enable depth loss. (experimental)
     depth_loss: bool = False
