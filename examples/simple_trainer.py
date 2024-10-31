@@ -107,9 +107,9 @@ class Config:
     ssim_lambda: float = 0.2
 
     # Near plane clipping distance
-    near_plane: float = 0.01
+    near_plane: float = 0.03
     # Far plane clipping distance
-    far_plane: float = 1e10
+    far_plane: float = 1e3
 
     # Strategy for GS densification
     strategy: Union[DefaultStrategy, MCMCStrategy] = field(
@@ -128,7 +128,9 @@ class Config:
     random_bkgd: bool = False
 
     # Opacity regularization
-    opacity_reg: float = 0.0
+    opacity_reg: float = 0.0 # 3e-6
+    # Opacity regularization end step
+    opacity_reg_end: int = 15_000
     # Scale regularization
     scale_reg: float = 0.0
 
@@ -171,7 +173,7 @@ class Config:
     # Enable normal consistency loss. (Currently for RaDe-GS only)
     normal_loss: bool = True
     # Weight for normal loss
-    normal_lambda: float = 5e-2
+    normal_lambda: float = 2e-2
     # Iteration to start normal consistency regulerization
     normal_start_iter: int = 7_000
 
@@ -494,85 +496,28 @@ class Runner:
             colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
-        if self.cfg.rasterization_method == "gs3d":
-            render_colors, render_alphas, info = rasterization(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=colors,
-                viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-                Ks=Ks,  # [C, 3, 3]
-                width=width,
-                height=height,
-                packed=self.cfg.packed,
-                absgrad=(
-                    self.cfg.strategy.absgrad
-                    if isinstance(self.cfg.strategy, DefaultStrategy)
-                    else False
-                ),
-                sparse_grad=self.cfg.sparse_grad,
-                rasterize_mode=rasterize_mode,
-                distributed=self.world_size > 1,
-                render_geo=self.render_geometry,
-                **kwargs,
-            )
-        elif self.cfg.rasterization_method == "radegs":
-            render_colors, render_alphas, render_depths, render_normals, info = rasterization_radegs(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=colors,
-                viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-                Ks=Ks,  # [C, 3, 3]
-                width=width,
-                height=height,
-                packed=self.cfg.packed,
-                absgrad=(
-                    self.cfg.strategy.absgrad
-                    if isinstance(self.cfg.strategy, DefaultStrategy)
-                    else False
-                ),
-                sparse_grad=self.cfg.sparse_grad,
-                rasterize_mode=rasterize_mode,
-                distributed=self.world_size > 1,
-                **kwargs,
-            )
-            info['render_depths'] = render_depths
-            info['render_normals'] = render_normals
-        elif self.cfg.rasterization_method == "radegs_inria":
-            (render_colors, render_alphas), info = rasterization_rade_inria_wrapper(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=colors,
-                viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-                Ks=Ks,
-                width=width,
-                height=height,
-                near_plane=0.01,
-                far_plane=100.0,
-                radius_clip=0.0,
-                eps2d=0.3,
-                sh_degree=None,
-                packed=False,
-                tile_size=16,
-                backgrounds=None,
-                render_mode="RGB",
-                sparse_grad=False,
-                absgrad=False,
-                rasterize_mode="classic",
-                channel_chunk=32,
-                distributed=False,
-                ortho=False,
-                covars=None,
-            )
-            info['render_depths'] = info["depth"]
-            info['render_normals'] = info["normals_rend"]
-        else:
-            raise ValueError(f"Unknown rasterization type: {self.cfg.rasterization_method}. Supported types are 'gs3d' and 'radegs'.")
+        render_colors, render_alphas, info = rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
+            Ks=Ks,  # [C, 3, 3]
+            width=width,
+            height=height,
+            packed=self.cfg.packed,
+            absgrad=(
+                self.cfg.strategy.absgrad
+                if isinstance(self.cfg.strategy, DefaultStrategy)
+                else False
+            ),
+            sparse_grad=self.cfg.sparse_grad,
+            rasterize_mode=rasterize_mode,
+            distributed=self.world_size > 1,
+            render_geo=self.render_geometry,
+            **kwargs,
+        )
 
         return render_colors, render_alphas, info
 
@@ -722,7 +667,7 @@ class Runner:
                 scales = torch.exp(self.splats["scales"])  # [N, 3]
                 sorted_scales, _ = torch.sort(scales, dim=-1)
                 min_scale_loss = sorted_scales[...,0]
-                loss += cfg.depth_lambda * min_scale_loss.mean()
+                loss += cfg.scale_lambda * min_scale_loss.mean()
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
@@ -746,32 +691,21 @@ class Runner:
                 tvloss = 10 * total_variation_loss(self.bil_grids.grids)
                 loss += tvloss
 
+            # normal consistency loss
             if cfg.normal_loss and step > cfg.normal_start_iter:
-                if True:
-                    # normals_from_depth = depth_to_normal(
-                    #     info['render_depths'], camtoworlds, Ks
-                    # ).squeeze(0)
-                    normals_from_depth = depth_to_normal(
-                        info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
-                    ).squeeze(0)
-                else:
-                    normals_from_depth = info['normals_from_depth']
-                # normal consistency loss
+                normals_from_depth = depth_to_normal(
+                    info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
+                ).squeeze(0)
                 normals = info['render_normals'].squeeze(0)
-                # normals_from_depth *= alphas.squeeze(0).detach()
-                # if len(normals_from_depth.shape) == 4:
-                #     normals_from_depth = normals_from_depth.squeeze(0)
-                if cfg.rasterization_method == "radegs_inria":
-                    normals_from_depth = normals_from_depth.permute((2, 0, 1))
-                normal_error = 1.0 - torch.sum(normals * normals_from_depth, dim=-1, keepdim=True)
                 image_weight = 1.0 - get_image_grad_weight(pixels).squeeze(0)
                 image_weight = image_weight.clamp(0,1).detach() ** 2
+                normal_error = image_weight * torch.sum((normals_from_depth - normals).abs(), dim=-1, keepdim=True)
                 wighted_normal_error = image_weight * normal_error
                 normalloss = cfg.normal_lambda * wighted_normal_error.mean()
                 loss += normalloss
 
             # regularizations
-            if cfg.opacity_reg > 0.0:
+            if cfg.opacity_reg > 0.0 and step < cfg.opacity_reg_end:
                 loss = (
                     loss
                     + cfg.opacity_reg
@@ -788,7 +722,7 @@ class Runner:
             # torch.autograd.set_detect_anomaly(True) # slow down training
             loss.backward()
 
-            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
+            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| " f"num splats={len(self.splats['means'])}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
             if cfg.pose_opt and cfg.pose_noise:

@@ -79,9 +79,5 @@ install(TARGETS gsplat
     LIBRARY DESTINATION lib
 )
 
-add_executable(test_splat test.cpp)
-target_link_libraries(test_splat ${TORCH_LIBRARIES} ${PYTHON_LIBRARIES} gsplat)
-target_include_directories(test_splat PUBLIC ${TORCH_INCLUDE_DIRS})
-
 message(STATUS "CMake configuration done!")
 

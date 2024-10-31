@@ -3,7 +3,7 @@ import math
 
 import torch
 
-from gsplat.rendering import rasterization, rasterization_radegs, rasterization_rade_inria_wrapper
+from gsplat.rendering import rasterization
 
 import tifffile
 import tyro
@@ -14,8 +14,6 @@ tensor_type = torch.float32
 class Rasterization(enum.Enum):
     GS3D = "gs3d"
     GS2D = "gs2d"
-    RADE = "rade"
-    RADE_INRIA = "rade_inria"
 
 def make_rotation_quat(angle):
     # Define the angle in radians
@@ -166,64 +164,6 @@ def rasterize_splats(splats, viewmats, Ks, width, height, rasterization_type: Ra
         render_normals = meta["render_normals"]
     elif rasterization_type == Rasterization.GS2D:
         raise NotImplementedError("GS2D rasterization is not implemented yet.")
-    elif rasterization_type == Rasterization.RADE:
-        render_colors, render_alphas, render_depths, render_normals, meta = rasterization_radegs(
-            means=splats["means"],
-            quats=splats["quats"],
-            scales=splats["scales"],
-            opacities=splats["opacities"],
-            colors=splats["colors"],
-            viewmats=viewmats,
-            Ks=Ks,
-            width=width,
-            height=height,
-            near_plane=0.01,
-            far_plane=100.0,
-            radius_clip=0.0,
-            eps2d=0.3,
-            sh_degree=None,
-            packed=False,
-            tile_size=16,
-            backgrounds=None,
-            render_mode="RGB",
-            sparse_grad=False,
-            absgrad=False,
-            rasterize_mode="classic",
-            channel_chunk=32,
-            distributed=False,
-            ortho=False,
-            covars=None,
-        )
-    elif rasterization_type == Rasterization.RADE_INRIA:
-        (render_colors, render_alphas), meta = rasterization_rade_inria_wrapper(
-            means=splats["means"],
-            quats=splats["quats"],
-            scales=splats["scales"],
-            opacities=splats["opacities"],
-            colors=splats["colors"],
-            viewmats=viewmats,
-            Ks=Ks,
-            width=width,
-            height=height,
-            near_plane=0.01,
-            far_plane=100.0,
-            radius_clip=0.0,
-            eps2d=0.3,
-            sh_degree=None,
-            packed=False,
-            tile_size=16,
-            backgrounds=None,
-            render_mode="RGB",
-            sparse_grad=False,
-            absgrad=False,
-            rasterize_mode="classic",
-            channel_chunk=32,
-            distributed=False,
-            ortho=False,
-            covars=None,
-        )
-        render_depths = meta["depth"]
-        render_normals = meta["normals_rend"]
 
     return render_colors, render_alphas, render_depths, render_normals
 
