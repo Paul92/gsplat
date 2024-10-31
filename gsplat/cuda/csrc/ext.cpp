@@ -89,23 +89,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def("selective_adam_update", &gsplat::selective_adam_update);
-
-    // RaDe-GS
-    m.def(
-        "fully_fused_projection_fwd_radegs",
-        &gsplat::fully_fused_projection_fwd_radegs_tensor
-    );
-    m.def(
-        "fully_fused_projection_bwd_radegs",
-        &gsplat::fully_fused_projection_bwd_radegs_tensor
-    );
-
-    m.def(
-        "rasterize_to_pixels_fwd_radegs",
-        &gsplat::rasterize_to_pixels_fwd_radegs_tensor
-    );
-    m.def(
-        "rasterize_to_pixels_bwd_radegs",
-        &gsplat::rasterize_to_pixels_bwd_radegs_tensor
-    );
 }

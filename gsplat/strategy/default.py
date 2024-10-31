@@ -147,7 +147,8 @@ class DefaultStrategy(Strategy):
         assert (
             self.key_for_gradient in info
         ), "The 2D means of the Gaussians is required but missing."
-        info[self.key_for_gradient].retain_grad()
+        if info[self.key_for_gradient].requires_grad:
+            info[self.key_for_gradient].retain_grad()
 
     def step_post_backward(
         self,
@@ -325,7 +326,7 @@ class DefaultStrategy(Strategy):
                 torch.exp(params["scales"]).max(dim=-1).values
                 > self.prune_scale3d * state["scene_scale"]
             )
-            # The official code also implements sreen-size pruning but
+            # The official code also implements screen-size pruning but
             # it's actually not being used due to a bug:
             # https://github.com/graphdeco-inria/gaussian-splatting/issues/123
             # We implement it here for completeness but set `refine_scale2d_stop_iter`
