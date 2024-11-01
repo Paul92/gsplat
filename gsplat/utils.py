@@ -33,12 +33,60 @@ def normalized_quat_to_rotmat(quat: Tensor) -> Tensor:
     return mat.reshape(quat.shape[:-1] + (3, 3))
 
 
+def quat_to_rotmat(quat: Tensor) -> Tensor:
+    """
+    Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: quaternions with real part first,
+            as tensor of shape (..., 4).
+
+    Returns:
+        Rotation matrices as tensor of shape (..., 3, 3).
+    """
+    w, x, y, z = torch.unbind(quat, -1)
+    two_s = 2.0 / (quat * quat).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (y * y + z * z),
+            two_s * (x * y - z * w),
+            two_s * (x * z + y * w),
+            two_s * (x * y + z * w),
+            1 - two_s * (x * x + z * z),
+            two_s * (y * z - x * w),
+            two_s * (x * z - y * w),
+            two_s * (y * z + x * w),
+            1 - two_s * (x * x + y * y),
+        ),
+        -1,
+    )
+    return o.reshape(quat.shape[:-1] + (3, 3))
+
+
 def log_transform(x):
     return torch.sign(x) * torch.log1p(torch.abs(x))
 
 
 def inverse_log_transform(y):
     return torch.sign(y) * (torch.expm1(torch.abs(y)))
+
+
+def get_normal_unoriented(quats: Tensor, scales: Tensor) -> Tensor:
+    """Get the unoriented normal of the gaussian in world coordinates as
+    the rotation axis corresponding to the smalles scale."""
+    rotation_matrices = quat_to_rotmat(quats)
+    smallest_axis_idx = scales.min(dim=-1)[1][..., None, None].expand(-1, 3, -1)
+    smallest_axis = rotation_matrices.gather(2, smallest_axis_idx)
+    return smallest_axis.squeeze(dim=2)
+
+def get_normal(means: Tensor, quats: Tensor, scales: Tensor, camera_center: Tensor) -> Tensor:
+    """Get the oriented normal of the gaussian in world coordintes."""
+    normal_global = get_normal_unoriented(quats, scales)
+    gaussian_to_cam_global = camera_center - means
+    neg_mask = (normal_global * gaussian_to_cam_global).sum(-1) < 0.0
+    normal_global[neg_mask] = -normal_global[neg_mask]
+    return normal_global
 
 
 def depth_to_points(
@@ -129,6 +177,21 @@ def depth_to_normal(
     normals = F.normalize(torch.cross(dx, dy, dim=-1), dim=-1)  # [..., H-2, W-2, 3]
     normals = F.pad(normals, (0, 0, 1, 1, 1, 1), value=0.0)  # [..., H, W, 3]
     return normals
+
+
+def get_image_grad_weight(image):
+    C, h, w, _ = image.shape 
+    bottom_point = image[..., 2:h, 1:w-1, :]
+    top_point    = image[..., 0:h-2, 1:w-1, :]
+    right_point  = image[..., 1:h-1, 2:w, :]
+    left_point   = image[..., 1:h-1, 0:w-2, :]
+    grad_img_x = torch.mean(torch.abs(right_point - left_point), dim=-1, keepdim=True)
+    grad_img_y = torch.mean(torch.abs(top_point - bottom_point), dim=-1, keepdim=True)
+    grad_img = torch.cat((grad_img_x, grad_img_y), dim=-1)
+    grad_img, _ = torch.max(grad_img, dim=-1, keepdim=True)
+    grad_img = (grad_img - grad_img.min()) / (grad_img.max() - grad_img.min())
+    grad_img = F.pad(grad_img, (0, 0, 1, 1, 1, 1), value=1.0)
+    return grad_img
 
 
 def get_projection_matrix(znear, zfar, fovX, fovY, device="cuda"):

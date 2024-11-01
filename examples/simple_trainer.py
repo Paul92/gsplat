@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
+import tifffile
 import imageio
 import nerfview
 import numpy as np
@@ -35,10 +36,12 @@ from lib_bilagrid import (
     color_correct,
     total_variation_loss,
 )
+from MvsUtils import saveDMAP, saveMVSInterface
 
+from gsplat.utils import depth_to_normal, get_image_grad_weight
 from gsplat.compression import PngCompression
 from gsplat.distributed import cli
-from gsplat.rendering import rasterization
+from gsplat.rendering import rasterization, rasterization_radegs, rasterization_rade_inria_wrapper
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 
@@ -82,9 +85,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [15_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [15_000, 30_000])
 
     # Initialization strategy
     init_type: str = "sfm"
@@ -104,9 +107,9 @@ class Config:
     ssim_lambda: float = 0.2
 
     # Near plane clipping distance
-    near_plane: float = 0.01
+    near_plane: float = 0.03
     # Far plane clipping distance
-    far_plane: float = 1e10
+    far_plane: float = 1e3
 
     # Strategy for GS densification
     strategy: Union[DefaultStrategy, MCMCStrategy] = field(
@@ -125,7 +128,9 @@ class Config:
     random_bkgd: bool = False
 
     # Opacity regularization
-    opacity_reg: float = 0.0
+    opacity_reg: float = 0.0 # 3e-6
+    # Opacity regularization end step
+    opacity_reg_end: int = 15_000
     # Scale regularization
     scale_reg: float = 0.0
 
@@ -152,10 +157,25 @@ class Config:
     # Shape of the bilateral grid (X, Y, W)
     bilateral_grid_shape: Tuple[int, int, int] = (16, 16, 8)
 
+    # Enable geometry computation (depths and normals)
+    render_geometry_start: int = 7_000
+
+    # Enable scale loss. (experimental)
+    scale_loss: bool = True
+    # Weight for scale loss
+    scale_lambda: float = 1e+2
+
     # Enable depth loss. (experimental)
     depth_loss: bool = False
     # Weight for depth loss
     depth_lambda: float = 1e-2
+
+    # Enable normal consistency loss. (Currently for RaDe-GS only)
+    normal_loss: bool = True
+    # Weight for normal loss
+    normal_lambda: float = 2e-2
+    # Iteration to start normal consistency regulerization
+    normal_start_iter: int = 7_000
 
     # Dump information to tensorboard every this steps
     tb_every: int = 100
@@ -163,6 +183,8 @@ class Config:
     tb_save_image: bool = False
 
     lpips_net: Literal["vgg", "alex"] = "alex"
+
+    rasterization_method: Literal["gs3d", "radegs", "radegs_inria"] = "gs3d"
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -294,6 +316,8 @@ class Runner:
         os.makedirs(self.stats_dir, exist_ok=True)
         self.render_dir = f"{cfg.result_dir}/renders"
         os.makedirs(self.render_dir, exist_ok=True)
+        self.mvs_dir = f"{cfg.result_dir}/mvs"
+        os.makedirs(self.mvs_dir, exist_ok=True)
 
         # Tensorboard
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
@@ -415,6 +439,8 @@ class Runner:
                 ),
             ]
 
+        self.render_geometry = False
+
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
@@ -489,12 +515,12 @@ class Runner:
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
-            camera_model=self.cfg.camera_model,
+            render_geo=self.render_geometry,
             **kwargs,
         )
-        if masks is not None:
-            render_colors[~masks] = 0
+
         return render_colors, render_alphas, info
+
 
     def train(self):
         cfg = self.cfg
@@ -589,6 +615,9 @@ class Runner:
             # sh schedule
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
+            # geometry schedule
+            self.render_geometry = step >= self.cfg.render_geometry_start
+
             # forward
             renders, alphas, info = self.rasterize_splats(
                 camtoworlds=camtoworlds,
@@ -634,6 +663,11 @@ class Runner:
                 colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            if cfg.scale_loss:
+                scales = torch.exp(self.splats["scales"])  # [N, 3]
+                sorted_scales, _ = torch.sort(scales, dim=-1)
+                min_scale_loss = sorted_scales[...,0]
+                loss += cfg.scale_lambda * min_scale_loss.mean()
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
@@ -657,8 +691,21 @@ class Runner:
                 tvloss = 10 * total_variation_loss(self.bil_grids.grids)
                 loss += tvloss
 
+            # normal consistency loss
+            if cfg.normal_loss and step > cfg.normal_start_iter:
+                normals_from_depth = depth_to_normal(
+                    info['render_depths'], torch.eye(4,4).to(device=camtoworlds.device).unsqueeze(0), Ks
+                ).squeeze(0)
+                normals = info['render_normals'].squeeze(0)
+                image_weight = 1.0 - get_image_grad_weight(pixels).squeeze(0)
+                image_weight = image_weight.clamp(0,1).detach() ** 2
+                normal_error = image_weight * torch.sum((normals_from_depth - normals).abs(), dim=-1, keepdim=True)
+                wighted_normal_error = image_weight * normal_error
+                normalloss = cfg.normal_lambda * wighted_normal_error.mean()
+                loss += normalloss
+
             # regularizations
-            if cfg.opacity_reg > 0.0:
+            if cfg.opacity_reg > 0.0 and step < cfg.opacity_reg_end:
                 loss = (
                     loss
                     + cfg.opacity_reg
@@ -670,9 +717,12 @@ class Runner:
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                print("*************** Loss contains NaN or Inf values *****************")
+            # torch.autograd.set_detect_anomaly(True) # slow down training
             loss.backward()
 
-            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
+            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| " f"num splats={len(self.splats['means'])}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
             if cfg.pose_opt and cfg.pose_noise:
@@ -763,10 +813,7 @@ class Runner:
 
             # optimize
             for optimizer in self.optimizers.values():
-                if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
-                    optimizer.step()
+                optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for optimizer in self.pose_optimizers:
                 optimizer.step()
@@ -806,6 +853,8 @@ class Runner:
             if step in [i - 1 for i in cfg.eval_steps]:
                 self.eval(step)
                 self.render_traj(step)
+                if step == max_steps - 1:
+                    self.export_depthmaps()
 
             # run compression
             if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
@@ -845,7 +894,7 @@ class Runner:
 
             torch.cuda.synchronize()
             tic = time.time()
-            colors, _, _ = self.rasterize_splats(
+            colors, alphas, info = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -853,7 +902,7 @@ class Runner:
                 sh_degree=cfg.sh_degree,
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
-                masks=masks,
+                masks=masks
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
@@ -869,6 +918,18 @@ class Runner:
                     f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
                     canvas,
                 )
+
+                if self.cfg.rasterization_method == "gs3d" or self.cfg.rasterization_method == "radegs":
+                    render_depths = info['render_depths'][0].cpu().numpy()
+                    render_normals = info['render_normals'][0].cpu().numpy()
+                    tifffile.imwrite(
+                        f"{self.render_dir}/{stage}_step{step}_{i:04d}_depth.tiff",
+                        render_depths,
+                    )
+                    tifffile.imwrite(
+                        f"{self.render_dir}/{stage}_step{step}_{i:04d}_normals.tiff",
+                        render_normals,
+                    )
 
                 pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
@@ -902,6 +963,108 @@ class Runner:
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
+
+    @torch.no_grad()
+    def export_depthmaps(self):
+        """Entry for depth-maps export."""
+        print("Running depth-maps export...")
+        cfg = self.cfg
+        device = self.device
+
+        dataset = torch.utils.data.ConcatDataset([self.valset, self.trainset])
+        valloader = torch.utils.data.DataLoader(
+            dataset, batch_size=1, shuffle=False, num_workers=1
+        )
+        indices = np.concatenate((self.valset.indices, self.trainset.indices), axis=0)
+        scene = {
+            'stream_version': 3,
+            'platforms': [],
+            'images': [],
+            'vertices': [],
+            'vertices_normal': [],
+            'vertices_color': [],
+            'lines': [],
+            'lines_normal': [],
+            'lines_color': [],
+            'transform': np.eye(4, dtype=np.float32).tolist()
+        }
+        ellipse_time = 0
+        for i, data in enumerate(valloader):
+            camtoworlds = data["camtoworld"].to(device)
+            Ks = data["K"].to(device)
+            height, width = data["image"].shape[1:3]
+
+            torch.cuda.synchronize()
+            tic = time.time()
+            renders, _, info = self.rasterize_splats(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                sh_degree=cfg.sh_degree,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                render_mode="RGB+ED",
+            )  # [1, H, W, 3]
+            torch.cuda.synchronize()
+            ellipse_time += time.time() - tic
+
+            depths = renders[..., 3:4]
+            if self.cfg.rasterization_method == "gs3d" or self.cfg.rasterization_method == "radegs":
+                depths = info['render_depths'][0].detach()
+                normals = info['render_normals'][0].detach()
+
+            # write DMAP
+            ID = indices[i]
+            worldtocam = np.linalg.inv(camtoworlds.cpu().numpy()[0, :, :])
+            image_name = os.path.join('images', os.path.basename(self.parser.image_paths[ID]))
+            dmap = {}
+            dmap['depth_map'] = depths.cpu().numpy()
+            # dmap['normal_map'] = normals.cpu().numpy()
+            dmap['file_name'] = image_name
+            dmap['reference_view_id'] = ID
+            dmap['neighbor_view_ids'] = []
+            dmap['image_width'] = width
+            dmap['image_height'] = height
+            dmap['depth_width'] = width
+            dmap['depth_height'] = height
+            dmap['depth_min'] = depths.min().cpu().numpy()
+            dmap['depth_max'] = depths.max().cpu().numpy()
+            dmap['K'] = Ks.cpu().numpy()[0, :, :]
+            dmap['R'] = worldtocam[:3, :3]
+            dmap['C'] = worldtocam[:3, :3].T @ -worldtocam[:3, 3]
+            saveDMAP(dmap, f"{self.mvs_dir}/depth{ID:04d}.dmap")
+
+            # update scene
+            image = {}
+            image['name'] = image_name
+            image['platform_id'] = len(scene['platforms'])
+            image['camera_id'] = 0
+            image['pose_id'] = 0
+            image['id'] = ID
+            scene['images'].append(image)
+
+            camera = {}
+            camera['name'] = f'camera_{ID}'
+            camera['width'] = width
+            camera['height'] = height
+            camera['K'] = dmap['K'].tolist()
+            camera['R'] = np.eye(3, dtype=np.float32).tolist()
+            camera['C'] = np.zeros(3, dtype=np.float32).tolist()
+            pose = {
+                'R': dmap['R'].tolist(),
+                'C': dmap['C'].tolist()
+            }
+            platform = {
+                'name': f'platform_{ID}',
+                'cameras': [camera],
+                'poses': [pose]
+            }
+            scene['platforms'].append(platform)
+
+        saveMVSInterface(scene, f"{self.mvs_dir}/scene.mvs")
+        ellipse_time /= len(valloader)
+        print(f"... done: {ellipse_time:.3f}s/image")
 
     @torch.no_grad()
     def render_traj(self, step: int):
@@ -1031,8 +1194,10 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         step = ckpts[0]["step"]
+        runner.render_geometry = step >= cfg.render_geometry_start
         runner.eval(step=step)
         runner.render_traj(step=step)
+        runner.export_depthmaps()
         if cfg.compression is not None:
             runner.run_compression(step=step)
     else:
