@@ -41,7 +41,7 @@ from MvsUtils import saveDMAP, saveMVSInterface
 from gsplat.utils import depth_to_normal, get_image_grad_weight
 from gsplat.compression import PngCompression
 from gsplat.distributed import cli
-from gsplat.rendering import rasterization, rasterization_radegs, rasterization_rade_inria_wrapper
+from gsplat.rendering import rasterization, rasterization_rade_inria_wrapper
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 from gsplat.utils import save_ply
@@ -175,7 +175,7 @@ class Config:
     # Weight for depth loss
     depth_lambda: float = 1e-2
 
-    # Enable normal consistency loss. (Currently for RaDe-GS only)
+    # Enable normal consistency loss
     normal_loss: bool = True
     # Weight for normal loss
     normal_lambda: float = 2e-2
@@ -189,7 +189,7 @@ class Config:
 
     lpips_net: Literal["vgg", "alex"] = "alex"
 
-    rasterization_method: Literal["gs3d", "radegs", "radegs_inria"] = "gs3d"
+    rasterization_method: Literal["gs3d", "radegs_inria"] = "gs3d"
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -945,7 +945,7 @@ class Runner:
                     canvas,
                 )
 
-                if self.cfg.rasterization_method == "gs3d" or self.cfg.rasterization_method == "radegs":
+                if self.cfg.rasterization_method == "gs3d":
                     render_depths = info['render_depths'][0].cpu().numpy()
                     render_normals = info['render_normals'][0].cpu().numpy()
                     tifffile.imwrite(
@@ -1036,7 +1036,7 @@ class Runner:
             ellipse_time += time.time() - tic
 
             depths = renders[..., 3:4]
-            if self.cfg.rasterization_method == "gs3d" or self.cfg.rasterization_method == "radegs":
+            if self.cfg.rasterization_method == "gs3d":
                 depths = info['render_depths'][0].detach()
                 normals = info['render_normals'][0].detach()
 
