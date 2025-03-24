@@ -18,7 +18,7 @@ class DefaultStrategy(Strategy):
 
     - Periodically duplicate GSs with high image plane gradients and small scales.
     - Periodically split GSs with high image plane gradients and large scales.
-    - Periodically prune GSs with low opacity.
+    - Periodically prune GSs with low opacity and with low Sensitivity Scores.
     - Periodically reset GSs to a lower opacity.
 
     If `absgrad=True`, it will use the absolute gradients instead of average gradients
@@ -42,6 +42,12 @@ class DefaultStrategy(Strategy):
           value will be pruned. Default is 0.1.
         prune_scale2d (float): GSs with 2d scale (normalized by image resolution) above
           this value will be pruned. Default is 0.15.
+        prune_sensitivity_base (float): Base percentage for GS pruning based on the Sensitivity Score.
+          GSs with sensitivity below or equal to prune_sensitivity_base * prune_sensitivity_decay ^ (step / 1000)
+          percent will be pruned. Default is 0.03.
+        prune_sensitivity_decay (float): Percentile decay for GS pruning based on the Sensitivity
+          Score. GSs with sensitivity below or equal to prune_grs * prune_grs_decay ^ (step / 1000)
+          percent will be pruned. Default is 1.0.
         refine_scale2d_stop_iter (int): Stop refining GSs based on 2d scale after this
           iteration. Default is 0. Set to a positive value to enable this feature.
         refine_start_iter (int): Start refining GSs after this iteration. Default is 500.
@@ -82,11 +88,13 @@ class DefaultStrategy(Strategy):
     grow_scale2d: float = 0.05
     prune_scale3d: float = 0.1
     prune_scale2d: float = 0.15
+    prune_sensitivity_base: float = 0.03
+    prune_sensitivity_decay: float = 1.0
     refine_scale2d_stop_iter: int = 0
     refine_start_iter: int = 500
     refine_stop_iter: int = 15_000
     reset_every: int = 3000
-    refine_every: int = 100
+    refine_every: int = 200
     pause_refine_after_reset: int = 0
     absgrad: bool = False
     revised_opacity: bool = False
@@ -331,6 +339,19 @@ class DefaultStrategy(Strategy):
                 is_too_big |= state["radii"] > self.prune_scale2d
 
             is_prune = is_prune | is_too_big
+
+        prune_percentile = self.prune_sensitivity_base * (self.prune_sensitivity_decay ** (step / 1000))
+
+        if prune_percentile > 0.0:
+            # The Sensitivity Score is equal to the accumulated 2D gradients resulted from rendering squared
+            sensitivity_score = state["grad2d"] ** 2
+            sensitivity_thres = torch.topk(
+                sensitivity_score,
+                int(prune_percentile * len(sensitivity_score)), 
+                largest=False,
+            ).values[-1]
+
+            is_prune = is_prune | (sensitivity_score < sensitivity_thres)
 
         n_prune = is_prune.sum().item()
         if n_prune > 0:
