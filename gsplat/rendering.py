@@ -44,6 +44,7 @@ def rasterization(
     sh_degree: Optional[int] = None,
     packed: bool = True,
     tile_size: int = 16,
+    isect_method: Optional[int] = 2,
     backgrounds: Optional[Tensor] = None,
     render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED"] = "RGB",
     sparse_grad: bool = False,
@@ -163,6 +164,9 @@ def rasterization(
             might not be as fast. Default is True.
         tile_size: The size of the tiles for rasterization. Default is 16.
             (Note: other values are not tested)
+        isect_method: The method to use for computing the intersecting tiles.
+                      0 is the original method, 1 is snug-box and 2 is accu-tile.
+                      See the SpeedySplat paper for more details https://arxiv.org/abs/2412.00578.
         backgrounds: The background colors. [C, D]. Default is None.
         render_mode: The rendering mode. Supported modes are "RGB", "D", "ED", "RGB+D",
             and "RGB+ED". "RGB" renders the colored image, "D" renders the accumulated depth, and
@@ -499,6 +503,8 @@ def rasterization(
     tile_height = math.ceil(height / float(tile_size))
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
+        opacities,
+        conics,
         radii,
         depths,
         tile_size,
@@ -508,6 +514,7 @@ def rasterization(
         n_cameras=C,
         camera_ids=camera_ids,
         gaussian_ids=gaussian_ids,
+        isect_method=isect_method,
     )
     # print("rank", world_rank, "Before isect_offset_encode")
     isect_offsets = isect_offset_encode(isect_ids, C, tile_width, tile_height)
@@ -699,6 +706,8 @@ def _rasterization(
     tile_height = math.ceil(height / float(tile_size))
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
+        opacities,
+        conics,
         radii,
         depths,
         tile_size,
@@ -1219,6 +1228,8 @@ def rasterization_2dgs(
     tile_height = math.ceil(height / float(tile_size))
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
+        opacities,
+        normals,
         radii,
         depths,
         tile_size,

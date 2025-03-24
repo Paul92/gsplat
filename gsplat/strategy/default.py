@@ -88,8 +88,8 @@ class DefaultStrategy(Strategy):
     grow_scale2d: float = 0.05
     prune_scale3d: float = 0.1
     prune_scale2d: float = 0.15
-    prune_sens_base: float = 0.03
-    prune_sens_decay: float = 1.0
+    prune_sensitivity_base: float = 0.03
+    prune_sensitivity_decay: float = 1.0
     refine_scale2d_stop_iter: int = 0
     refine_start_iter: int = 500
     refine_stop_iter: int = 15_000
@@ -344,7 +344,7 @@ class DefaultStrategy(Strategy):
 
             is_prune = is_prune | is_too_big
 
-        prune_percentile = self.prune_sens_base * (self.prune_sens_decay ** (step / 1000))
+        prune_percentile = self.prune_sensitivity_base * (self.prune_sensitivity_decay ** (step / 1000))
 
         if prune_percentile > 0.0:
             # The Sensitivity Score is equal to the accumulated 2D gradients resulted from rendering squared

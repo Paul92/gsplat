@@ -346,6 +346,8 @@ def fully_fused_projection(
 @torch.no_grad()
 def isect_tiles(
     means2d: Tensor,  # [C, N, 2] or [nnz, 2]
+    opacities: Tensor,  # [C, N] or [nnz]
+    conics: Tensor,  # [C, N, 3] or [nnz, 3]
     radii: Tensor,  # [C, N] or [nnz]
     depths: Tensor,  # [C, N] or [nnz]
     tile_size: int,
@@ -356,11 +358,14 @@ def isect_tiles(
     n_cameras: Optional[int] = None,
     camera_ids: Optional[Tensor] = None,
     gaussian_ids: Optional[Tensor] = None,
+    isect_method: Optional[int] = 2,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Maps projected Gaussians to intersecting tiles.
 
     Args:
         means2d: Projected Gaussian means. [C, N, 2] if packed is False, [nnz, 2] if packed is True.
+        opacities: Opacities of the Gaussians. [C, N] if packed is False, [nnz] if packed is True.
+        conics: Inverse of the projected covariances. [C, N, 3] if packed is False, [nnz, 3] if packed is True.
         radii: Maximum radii of the projected Gaussians. [C, N] if packed is False, [nnz] if packed is True.
         depths: Z-depth of the projected Gaussians. [C, N] if packed is False, [nnz] if packed is True.
         tile_size: Tile size.
@@ -371,6 +376,8 @@ def isect_tiles(
         n_cameras: Number of cameras. Required if packed is True.
         camera_ids: The row indices of the projected Gaussians. Required if packed is True.
         gaussian_ids: The column indices of the projected Gaussians. Required if packed is True.
+        isect_method: The intersection method: 0 for original, 1 for snug-box and 2 for accu-tile.
+                      See SpeedySplat paper for details. https://arxiv.org/abs/2412.00578
 
     Returns:
         A tuple:
@@ -386,6 +393,8 @@ def isect_tiles(
     if packed:
         nnz = means2d.size(0)
         assert means2d.shape == (nnz, 2), means2d.size()
+        assert opacities.shape == (nnz,), opacities.size()
+        assert conics.shape == (nnz, 3), conics.size()
         assert radii.shape == (nnz,), radii.size()
         assert depths.shape == (nnz,), depths.size()
         assert camera_ids is not None, "camera_ids is required if packed is True"
@@ -398,11 +407,15 @@ def isect_tiles(
     else:
         C, N, _ = means2d.shape
         assert means2d.shape == (C, N, 2), means2d.size()
+        assert opacities.shape == (C, N), opacities.size()
+        assert conics.shape == (C, N, 3), conics.size()
         assert radii.shape == (C, N), radii.size()
         assert depths.shape == (C, N), depths.size()
 
     tiles_per_gauss, isect_ids, flatten_ids = _make_lazy_cuda_func("isect_tiles")(
         means2d.contiguous(),
+        opacities.contiguous(),
+        conics.contiguous(),
         radii.contiguous(),
         depths.contiguous(),
         camera_ids,
@@ -413,6 +426,7 @@ def isect_tiles(
         tile_height,
         sort,
         True,  # DoubleBuffer: memory efficient radixsort
+        isect_method,
     )
     return tiles_per_gauss, isect_ids, flatten_ids
 
