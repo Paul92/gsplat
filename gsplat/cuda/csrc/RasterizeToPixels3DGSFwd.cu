@@ -24,6 +24,8 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     const vec3 *__restrict__ conics,          // [I, N, 3] or [nnz, 3]
     const scalar_t *__restrict__ colors,      // [I, N, CDIM] or [nnz, CDIM]
     const scalar_t *__restrict__ opacities,   // [I, N] or [nnz]
+    const scalar_t *__restrict__ planes,      // [I, N, 4]
+    const scalar_t *__restrict__ Ks,          // [I, 3, 3]
     const scalar_t *__restrict__ backgrounds, // [I, CDIM]
     const bool *__restrict__ masks,           // [I, tile_height, tile_width]
     const uint32_t image_width,
@@ -36,7 +38,11 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     scalar_t
         *__restrict__ render_colors, // [I, image_height, image_width, CDIM]
     scalar_t *__restrict__ render_alphas, // [I, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids        // [I, image_height, image_width]
+    scalar_t *__restrict__ render_planes, // [C, image_height, image_width, 4]
+    scalar_t *__restrict__ render_depths, // [C, image_height, image_width, 1]
+    int32_t *__restrict__ last_ids,        // [I, image_height, image_width]
+    const bool render_geo
+
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -51,6 +57,8 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     tile_offsets += image_id * tile_height * tile_width;
     render_colors += image_id * image_height * image_width * CDIM;
     render_alphas += image_id * image_height * image_width;
+    render_planes += image_id * image_height * image_width * 4;
+    render_depths += image_id * image_height * image_width;
     last_ids += image_id * image_height * image_width;
     if (backgrounds != nullptr) {
         backgrounds += image_id * CDIM;
@@ -61,7 +69,12 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
 
     float px = (float)j + 0.5f;
     float py = (float)i + 0.5f;
-    int32_t pix_id = i * image_width + j;
+    const float fx = Ks[0];
+    const float fy = Ks[4];
+    const float cx = Ks[2];
+    const float cy = Ks[5];
+	const vec2 ray = {(px - cx) / fx, (py - cy) / fy};
+    const int32_t pix_id = i * image_width + j;
 
     // return if out of bounds
     // keep not rasterizing threads around for reading data
@@ -112,6 +125,7 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     uint32_t tr = block.thread_rank();
 
     float pix_out[CDIM] = {0.f};
+    float plane_out[4] = {0.f};
     for (uint32_t b = 0; b < num_batches; ++b) {
         // resync all threads before beginning next batch
         // end early if entire tile is done
@@ -159,10 +173,17 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
             int32_t g = id_batch[t];
             const float vis = alpha * T;
             const float *c_ptr = colors + g * CDIM;
+            const float *p_ptr = planes + g * 4;
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
                 pix_out[k] += c_ptr[k] * vis;
             }
+            if (render_geo) {
+#pragma unroll
+				for (int k = 0; k < 4; ++k) {
+					plane_out[k] += p_ptr[k] * vis;
+                }
+			}
             cur_idx = batch_start + t;
 
             T = next_T;
@@ -182,6 +203,12 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
                 backgrounds == nullptr ? pix_out[k]
                                        : (pix_out[k] + T * backgrounds[k]);
         }
+        if (render_geo) {
+#pragma unroll
+			for (int k = 0; k < 4; ++k)
+				render_planes[pix_id * 4 + k] = plane_out[k];
+			render_depths[pix_id] = plane_out[3] / (plane_out[0] * ray.x + plane_out[1] * ray.y + plane_out[2] + 1.0e-8);
+		}
         // index in bin of last gaussian in this pixel
         last_ids[pix_id] = static_cast<int32_t>(cur_idx);
     }
@@ -194,6 +221,8 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     const at::Tensor conics,    // [..., N, 3] or [nnz, 3]
     const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., N]  or [nnz]
+    const at::Tensor planes,    // [..., N, 4]
+    const at::Tensor Ks,        // [..., 3, 3]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
     // image size
@@ -204,9 +233,13 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
     // outputs
-    at::Tensor renders, // [..., image_height, image_width, channels]
-    at::Tensor alphas,  // [..., image_height, image_width]
-    at::Tensor last_ids // [..., image_height, image_width]
+    at::Tensor renders,       // [..., image_height, image_width, channels]
+    at::Tensor alphas,        // [..., image_height, image_width]
+    at::Tensor render_planes, // [..., image_height, image_width, 4]
+    at::Tensor render_depths, // [..., image_height, image_width]
+    at::Tensor last_ids,      // [..., image_height, image_width]
+    // Rasterization parameters
+    const bool render_geo = false
 ) {
     bool packed = means2d.dim() == 2;
 
@@ -249,6 +282,8 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
             reinterpret_cast<vec3 *>(conics.data_ptr<float>()),
             colors.data_ptr<float>(),
             opacities.data_ptr<float>(),
+            planes.data_ptr<float>(),
+            Ks.data_ptr<float>(),
             backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
                                     : nullptr,
             masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
@@ -261,7 +296,10 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
             flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(),
             alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>()
+            render_planes.data_ptr<float>(),
+            render_depths.data_ptr<float>(),
+            last_ids.data_ptr<int32_t>(),
+            render_geo
         );
 }
 
@@ -274,6 +312,8 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
         const at::Tensor conics,                                               \
         const at::Tensor colors,                                               \
         const at::Tensor opacities,                                            \
+        const at::Tensor planes,                                               \
+        const at::Tensor Ks,                                                   \
         const at::optional<at::Tensor> backgrounds,                            \
         const at::optional<at::Tensor> masks,                                  \
         uint32_t image_width,                                                  \
@@ -283,7 +323,10 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
         const at::Tensor flatten_ids,                                          \
         at::Tensor renders,                                                    \
         at::Tensor alphas,                                                     \
-        at::Tensor last_ids                                                    \
+        at::Tensor render_planes,                                              \
+        at::Tensor render_depths,                                              \
+        at::Tensor last_ids,                                                   \
+        bool render_geo                                                        \
     );
 
 __INS__(1)
