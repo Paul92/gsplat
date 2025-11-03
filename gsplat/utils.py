@@ -255,6 +255,21 @@ def get_projection_matrix(znear, zfar, fovX, fovY, device="cuda"):
     return P
 
 
+def get_image_grad_weight(image):
+    C, h, w, _ = image.shape 
+    bottom_point = image[..., 2:h, 1:w-1, :]
+    top_point    = image[..., 0:h-2, 1:w-1, :]
+    right_point  = image[..., 1:h-1, 2:w, :]
+    left_point   = image[..., 1:h-1, 0:w-2, :]
+    grad_img_x = torch.mean(torch.abs(right_point - left_point), dim=-1, keepdim=True)
+    grad_img_y = torch.mean(torch.abs(top_point - bottom_point), dim=-1, keepdim=True)
+    grad_img = torch.cat((grad_img_x, grad_img_y), dim=-1)
+    grad_img, _ = torch.max(grad_img, dim=-1, keepdim=True)
+    grad_img = (grad_img - grad_img.min()) / (grad_img.max() - grad_img.min())
+    grad_img = F.pad(grad_img, (0, 0, 1, 1, 1, 1), value=1.0)
+    return grad_img
+
+
 # def depth_to_normal(
 #     depths: Tensor, camtoworlds: Tensor, Ks: Tensor, near_plane: float, far_plane: float
 # ) -> Tensor:
