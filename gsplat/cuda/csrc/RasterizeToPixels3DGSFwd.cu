@@ -25,7 +25,7 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     const scalar_t *__restrict__ colors,      // [I, N, CDIM] or [nnz, CDIM]
     const scalar_t *__restrict__ opacities,   // [I, N] or [nnz]
     const scalar_t *__restrict__ planes,      // [I, N, 4]
-    const scalar_t *__restrict__ Ks,          // [I, 3, 3]
+    const scalar_t *__restrict__ Ks,          // [1, 3, 3]
     const scalar_t *__restrict__ backgrounds, // [I, CDIM]
     const bool *__restrict__ masks,           // [I, tile_height, tile_width]
     const uint32_t image_width,
@@ -221,7 +221,7 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., N]  or [nnz]
     const at::Tensor planes,    // [..., N, 4]
-    const at::Tensor Ks,        // [..., 3, 3]
+    const at::Tensor Ks,        // [1, 3, 3]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
     // image size

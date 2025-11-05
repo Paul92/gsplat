@@ -672,7 +672,11 @@ def rasterization(
         }
     )
     
-    #viewmats: world to camera transformation matrices. [C, 4, 4].
+    # viewmats: world to camera transformation matrices. [C, 4, 4].
+    # TODO: check broadcasting when C > 1
+    assert (
+        C == 1
+    ), "Plane computation currently tested for single-camera setups only."
     Rot = viewmats[:, :3, :3]  # [C, 3, 3]
     t = viewmats[:, :3, 3]  # [C, 3]
     Center = torch.einsum('bij,bj->bi', Rot.transpose(1, 2), -t)  # [C, 3]
@@ -917,9 +921,9 @@ def _rasterization(
     tile_height = math.ceil(height / float(tile_size))
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
-        radii,
         opacities,
         conics,
+        radii,
         depths,
         tile_size,
         tile_width,
@@ -1523,8 +1527,26 @@ def rasterization_2dgs(
     # Identify intersecting tiles
     tile_width = math.ceil(width / float(tile_size))
     tile_height = math.ceil(height / float(tile_size))
+    # The SpeedySplat intersection kernels expect ellipse coefficients a, b, c.
+    # 2DGS projection does not provide conics, so fall back to an axis-aligned
+    # approximation derived from the projected radii.
+    radii_float = radii.to(means2d.dtype)
+    inv_radii_sq = torch.zeros_like(radii_float)
+    valid_mask = radii_float > 0
+    inv_radii_sq[valid_mask] = 1.0 / (radii_float[valid_mask] ** 2 + 1.0e-12)
+    conics_approx = torch.stack(
+        (
+            inv_radii_sq[..., 0],
+            torch.zeros_like(inv_radii_sq[..., 0]),
+            inv_radii_sq[..., 1],
+        ),
+        dim=-1,
+    )
+
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
+        opacities,
+        conics_approx,
         radii,
         depths,
         tile_size,
