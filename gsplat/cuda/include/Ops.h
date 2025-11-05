@@ -185,6 +185,8 @@ void adam(
 // GS Tile Intersection
 std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
     const at::Tensor means2d,                    // [..., C, N, 2] or [nnz, 2]
+    const at::Tensor opacities,                  // [..., C, N] or [nnz]
+    const at::Tensor conics,                     // [..., C, N, 3] or [nnz, 3]
     const at::Tensor radii,                      // [..., C, N, 2] or [nnz, 2]
     const at::Tensor depths,                     // [..., C, N] or [nnz]
     const at::optional<at::Tensor> image_ids,    // [nnz]
@@ -194,7 +196,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
     const uint32_t tile_width,
     const uint32_t tile_height,
     const bool sort,
-    const bool segmented
+    const bool segmented,
+    const IntersectKind isect_method
 );
 at::Tensor intersect_offset(
     const at::Tensor isect_ids, // [n_isects]
@@ -220,12 +223,14 @@ std::tuple<at::Tensor, at::Tensor> quat_scale_to_covar_preci_bwd(
 );
 
 // Rasterize 3D Gaussian to pixels
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means2d,   // [..., N, 2] or [nnz, 2]
     const at::Tensor conics,    // [..., N, 3] or [nnz, 3]
     const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., N]  or [nnz]
+    const at::Tensor planes,    // [..., N, 4] or [nnz, 4]
+    const at::Tensor Ks,
     const at::optional<at::Tensor> backgrounds, // [..., channels]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
     // image size
@@ -234,15 +239,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // options
+    bool render_geo
 );
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
     // Gaussian parameters
     const at::Tensor means2d,                   // [..., N, 2] or [nnz, 2]
     const at::Tensor conics,                    // [..., N, 3] or [nnz, 3]
     const at::Tensor colors,                    // [..., N, 3] or [nnz, 3]
     const at::Tensor opacities,                 // [..., N] or [nnz]
+    const at::Tensor planes,                    // [..., N, 4] or [nnz, 4]
+    const at::Tensor Ks,                        // []
     const at::optional<at::Tensor> backgrounds, // [..., 3]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
     // image size
@@ -254,12 +263,16 @@ rasterize_to_pixels_3dgs_bwd(
     const at::Tensor flatten_ids,  // [n_isects]
     // forward outputs
     const at::Tensor render_alphas, // [..., image_height, image_width, 1]
+    const at::Tensor render_planes, // [..., image_height, image_width, 4]
     const at::Tensor last_ids,      // [..., image_height, image_width]
     // gradients of outputs
     const at::Tensor v_render_colors, // [..., image_height, image_width, 3]
     const at::Tensor v_render_alphas, // [..., image_height, image_width, 1]
+    const at::Tensor v_render_planes, // [..., image_height, image_width, 4]
+    const at::Tensor v_render_depths, // [..., image_height, image_width, 1]
     // options
-    bool absgrad
+    bool absgrad,
+    bool render_geo
 );
 
 // Rasterize 3D Gaussian, but only return the indices of gaussians and pixels.

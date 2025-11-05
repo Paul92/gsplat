@@ -377,6 +377,8 @@ def _fully_fused_projection(
 @torch.no_grad()
 def _isect_tiles(
     means2d: Tensor,  # [..., N, 2]
+    opacities: Tensor, # [..., N] or [nnz]
+    conics: Tensor,    # [..., N, 3] or [nnz, 3]
     radii: Tensor,  # [..., N, 2]
     depths: Tensor,  # [..., N]
     tile_size: int,

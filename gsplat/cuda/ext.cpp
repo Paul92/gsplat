@@ -12,6 +12,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .value("FTHETA", gsplat::CameraModelType::FTHETA)
         .export_values();
 
+    py::enum_<gsplat::IntersectKind>(m, "IntersectKind")
+        .value("AxisAligned", gsplat::IntersectKind::AxisAligned)
+        .value("SnugBox", gsplat::IntersectKind::SnugBox)
+        .value("AccuTile", gsplat::IntersectKind::AccuTile)
+        .export_values();
+
     m.def("null", &gsplat::null);
 
     m.def(

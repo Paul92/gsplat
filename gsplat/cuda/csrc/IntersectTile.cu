@@ -381,6 +381,8 @@ __global__ void intersect_tile_kernel(
     const int64_t *__restrict__ gaussian_ids, // [nnz] optional
     // data
     const scalar_t *__restrict__ means2d,            // [..., N, 2] or [nnz, 2]
+    const scalar_t* __restrict__ opacities,          // [..., N] or [nnz]
+    const scalar_t* __restrict__ conics,             // [..., N, 3] or [nnz, 3]
     const int32_t *__restrict__ radii,               // [..., N, 2] or [nnz, 2]
     const scalar_t *__restrict__ depths,             // [..., N] or [nnz]
     const int64_t *__restrict__ cum_tiles_per_gauss, // [..., N] or [nnz]
@@ -461,11 +463,6 @@ __global__ void intersect_tile_kernel(
     }
 }
 
-enum class IntersectKind : uint8_t {
-    AxisAligned = 0,
-    SnugBox = 1,
-    AccuTile = 2
- };
 
 void launch_intersect_tile_kernel(
     // inputs
@@ -486,7 +483,7 @@ void launch_intersect_tile_kernel(
     at::optional<at::Tensor> isect_ids,       // [n_isects]
     at::optional<at::Tensor> flatten_ids,     // [n_isects]
     // options
-    IntersectKind intersect_kind = IntersectKind::AxisAligned
+    IntersectKind intersect_kind
 ) {
     bool packed = means2d.dim() == 2;
 
@@ -542,6 +539,8 @@ void launch_intersect_tile_kernel(
                                 ? gaussian_ids.value().data_ptr<int64_t>()
                                 : nullptr,
                             means2d.data_ptr<scalar_t>(),
+                            opacities.data_ptr<scalar_t>(),
+                            conics.data_ptr<scalar_t>(),
                             radii.data_ptr<int32_t>(),
                             depths.data_ptr<scalar_t>(),
                             cum_tiles_per_gauss.has_value()

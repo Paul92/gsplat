@@ -36,13 +36,12 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     const int32_t *__restrict__ tile_offsets, // [I, tile_height, tile_width]
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     scalar_t
-        *__restrict__ render_colors, // [I, image_height, image_width, CDIM]
+        *__restrict__ render_colors,      // [I, image_height, image_width, CDIM]
     scalar_t *__restrict__ render_alphas, // [I, image_height, image_width, 1]
-    scalar_t *__restrict__ render_planes, // [C, image_height, image_width, 4]
-    scalar_t *__restrict__ render_depths, // [C, image_height, image_width, 1]
-    int32_t *__restrict__ last_ids,        // [I, image_height, image_width]
+    scalar_t *__restrict__ render_planes, // [I, image_height, image_width, 4]
+    scalar_t *__restrict__ render_depths, // [I, image_height, image_width, 1]
+    int32_t *__restrict__ last_ids,       // [I, image_height, image_width]
     const bool render_geo
-
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile

@@ -17,12 +17,14 @@ namespace gsplat {
 // 3DGS
 ////////////////////////////////////////////////////
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means2d,   // [..., N, 2] or [nnz, 2]
     const at::Tensor conics,    // [..., N, 3] or [nnz, 3]
     const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., N]  or [nnz]
+    const at::Tensor planes,    // [..., N, 4] or [nnz, 4]
+    const at::Tensor Ks,        // [I, 3, 3]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
     // image size
@@ -31,13 +33,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // options
+    bool render_geo
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
     CHECK_INPUT(conics);
     CHECK_INPUT(colors);
     CHECK_INPUT(opacities);
+    CHECK_INPUT(planes);
+    CHECK_INPUT(Ks);
     CHECK_INPUT(tile_offsets);
     CHECK_INPUT(flatten_ids);
     if (backgrounds.has_value()) {
@@ -59,6 +65,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     alphas_dims.append({image_height, image_width, 1});
     at::Tensor alphas = at::empty(alphas_dims, opt);
 
+    at::DimVector render_planes_dims(image_dims);
+    render_planes_dims.append({image_height, image_width, 4});
+    at::Tensor render_planes = at::empty(render_planes_dims, opt);
+
+    at::DimVector render_depth_dims(image_dims);
+    render_depth_dims.append({image_height, image_width, 1});
+    at::Tensor render_depths = at::empty(render_depth_dims, opt);
+
     at::DimVector last_ids_dims(image_dims);
     last_ids_dims.append({image_height, image_width});
     at::Tensor last_ids = at::empty(last_ids_dims, opt.dtype(at::kInt));
@@ -70,6 +84,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
             conics,                                                            \
             colors,                                                            \
             opacities,                                                         \
+            planes,                                                            \
+            Ks,                                                                \
             backgrounds,                                                       \
             masks,                                                             \
             image_width,                                                       \
@@ -79,7 +95,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
-            last_ids                                                           \
+            render_planes,                                                     \
+            render_depths,                                                     \
+            last_ids,                                                          \
+            render_geo                                                         \
         );                                                                     \
         break;
 
@@ -111,16 +130,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     }
 #undef __LAUNCH_KERNEL__
 
-    return std::make_tuple(renders, alphas, last_ids);
+    return std::make_tuple(renders, alphas, render_planes, render_depths, last_ids);
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
     // Gaussian parameters
     const at::Tensor means2d,                   // [..., N, 2] or [nnz, 2]
     const at::Tensor conics,                    // [..., N, 3] or [nnz, 3]
     const at::Tensor colors,                    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities,                 // [..., N] or [nnz]
+    const at::Tensor planes,                    // [..., N, 4] or [nnz, 4]
+    const at::Tensor Ks,                        // []
     const at::optional<at::Tensor> backgrounds, // [..., channels]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
     // image size
@@ -132,24 +153,32 @@ rasterize_to_pixels_3dgs_bwd(
     const at::Tensor flatten_ids,  // [n_isects]
     // forward outputs
     const at::Tensor render_alphas, // [..., image_height, image_width, 1]
+    const at::Tensor render_planes, // [..., image_height, image_width, 4]
     const at::Tensor last_ids,      // [..., image_height, image_width]
     // gradients of outputs
     const at::Tensor v_render_colors, // [..., image_height, image_width, channels]
     const at::Tensor v_render_alphas, // [..., image_height, image_width, 1]
+    const at::Tensor v_render_planes, // [..., image_height, image_width, 4]
+    const at::Tensor v_render_depths, // [..., image_height, image_width, 1]
     // options
-    bool absgrad
+    bool absgrad,
+    bool render_geo
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
     CHECK_INPUT(conics);
     CHECK_INPUT(colors);
+    CHECK_INPUT(planes);
     CHECK_INPUT(opacities);
     CHECK_INPUT(tile_offsets);
     CHECK_INPUT(flatten_ids);
     CHECK_INPUT(render_alphas);
+    CHECK_INPUT(render_planes);
     CHECK_INPUT(last_ids);
     CHECK_INPUT(v_render_colors);
     CHECK_INPUT(v_render_alphas);
+    CHECK_INPUT(v_render_planes);
+    CHECK_INPUT(v_render_depths);
     if (backgrounds.has_value()) {
         CHECK_INPUT(backgrounds.value());
     }
@@ -163,6 +192,7 @@ rasterize_to_pixels_3dgs_bwd(
     at::Tensor v_conics = at::zeros_like(conics);
     at::Tensor v_colors = at::zeros_like(colors);
     at::Tensor v_opacities = at::zeros_like(opacities);
+    at::Tensor v_planes = at::zeros_like(planes);
     at::Tensor v_means2d_abs;
     if (absgrad) {
         v_means2d_abs = at::zeros_like(means2d);
@@ -175,6 +205,8 @@ rasterize_to_pixels_3dgs_bwd(
             conics,                                                            \
             colors,                                                            \
             opacities,                                                         \
+            planes,                                                            \
+            Ks,                                                                \
             backgrounds,                                                       \
             masks,                                                             \
             image_width,                                                       \
@@ -183,14 +215,19 @@ rasterize_to_pixels_3dgs_bwd(
             tile_offsets,                                                      \
             flatten_ids,                                                       \
             render_alphas,                                                     \
+            render_planes,                                                     \
             last_ids,                                                          \
             v_render_colors,                                                   \
             v_render_alphas,                                                   \
+            v_render_planes,                                                   \
+            v_render_depths,                                                   \
             absgrad ? c10::optional<at::Tensor>(v_means2d_abs) : c10::nullopt, \
             v_means2d,                                                         \
             v_conics,                                                          \
             v_colors,                                                          \
-            v_opacities                                                        \
+            v_opacities,                                                       \
+            v_planes,                                                          \
+            render_geo                                                         \
         );                                                                     \
         break;
 
@@ -223,7 +260,7 @@ rasterize_to_pixels_3dgs_bwd(
 #undef __LAUNCH_KERNEL__
 
     return std::make_tuple(
-        v_means2d_abs, v_means2d, v_conics, v_colors, v_opacities
+        v_means2d_abs, v_means2d, v_conics, v_colors, v_opacities, v_planes
     );
 }
 

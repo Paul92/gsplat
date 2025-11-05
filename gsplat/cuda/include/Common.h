@@ -50,6 +50,15 @@ enum CameraModelType {
     FTHETA = 3,
 };
 
+//
+// Type of intersection used for tiling
+//
+enum class IntersectKind : uint8_t {
+    AxisAligned = 0,
+    SnugBox = 1,
+    AccuTile = 2
+ };
+
 #define N_THREADS_PACKED 256
 #define ALPHA_THRESHOLD (1.f / 255.f)
 

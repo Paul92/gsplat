@@ -14,6 +14,8 @@ namespace gsplat {
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
     const at::Tensor means2d,                    // [..., N, 2] or [nnz, 2]
+    const at::Tensor opacities,                  // [..., N] or [nnz]
+    const at::Tensor conics,                     // [..., N, 3] or [nnz, 3]
     const at::Tensor radii,                      // [..., N, 2] or [nnz, 2]
     const at::Tensor depths,                     // [..., N] or [nnz]
     const at::optional<at::Tensor> image_ids,    // [nnz]
@@ -23,7 +25,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
     const uint32_t tile_width,
     const uint32_t tile_height,
     const bool sort,
-    const bool segmented
+    const bool segmented,
+    const IntersectKind isect_method
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
@@ -62,6 +65,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
         launch_intersect_tile_kernel(
             // inputs
             means2d,
+            opacities,
+            conics,
             radii,
             depths,
             packed ? image_ids : c10::nullopt,
@@ -74,7 +79,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
             // outputs
             at::optional<at::Tensor>(tiles_per_gauss),
             c10::nullopt, // isect_ids
-            c10::nullopt  // flatten_ids
+            c10::nullopt,  // flatten_ids
+            // options
+            isect_method
         );
         cum_tiles_per_gauss = at::cumsum(tiles_per_gauss.view({-1}), 0);
         n_isects = cum_tiles_per_gauss[-1].item<int64_t>();
@@ -99,6 +106,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
         launch_intersect_tile_kernel(
             // inputs
             means2d,
+            opacities,
+            conics,
             radii,
             depths,
             packed ? image_ids : c10::nullopt,
@@ -111,7 +120,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
             // outputs
             c10::nullopt, // tiles_per_gauss
             at::optional<at::Tensor>(isect_ids),
-            at::optional<at::Tensor>(flatten_ids)
+            at::optional<at::Tensor>(flatten_ids),
+            // options
+            isect_method
         );
     }
 

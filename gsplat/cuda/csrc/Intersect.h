@@ -8,9 +8,13 @@ class Tensor;
 
 namespace gsplat {
 
+
+
 void launch_intersect_tile_kernel(
     // inputs
     const at::Tensor means2d,                    // [..., N, 2] or [nnz, 2]
+    const at::Tensor opacities,                  // [..., N] or [nnz]
+    const at::Tensor conics,                     // [..., N, 3] or [nnz, 3]
     const at::Tensor radii,                      // [..., N, 2] or [nnz, 2]
     const at::Tensor depths,                     // [..., N] or [nnz]
     const at::optional<at::Tensor> image_ids,    // [nnz]
@@ -23,7 +27,8 @@ void launch_intersect_tile_kernel(
     // outputs
     at::optional<at::Tensor> tiles_per_gauss, // [..., N] or [nnz]
     at::optional<at::Tensor> isect_ids,       // [n_isects]
-    at::optional<at::Tensor> flatten_ids      // [n_isects]
+    at::optional<at::Tensor> flatten_ids,     // [n_isects]
+    IntersectKind intersect_kind = IntersectKind::AxisAligned
 );
 
 void launch_intersect_offset_kernel(

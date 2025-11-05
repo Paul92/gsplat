@@ -28,9 +28,9 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     const scalar_t *__restrict__ colors,      // [..., N, CDIM] or [nnz, CDIM]
     const scalar_t *__restrict__ opacities,   // [..., N] or [nnz]
     const vec4 *__restrict__ planes,          // [..., N, 4] or [nnz, 4]
+    const scalar_t *__restrict__ Ks,                 // [..., 3, 3]
     const scalar_t *__restrict__ backgrounds, // [..., CDIM] or [nnz, CDIM]
     const bool *__restrict__ masks,           // [..., tile_height, tile_width]
-    const scalar_t *__restrict__ Ks,                 // [..., 3, 3]
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
@@ -354,9 +354,9 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     const at::Tensor colors,                    // [..., N, 3] or [nnz, 3]
     const at::Tensor opacities,                 // [..., N] or [nnz]
     const at::Tensor planes,                    // [..., N, 4] or [nnz, 4]
+    const at::Tensor Ks,                        // [..., 3, 3]
     const at::optional<at::Tensor> backgrounds, // [..., 3]
     const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
-    const at::Tensor Ks,                        // [..., 3, 3]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
@@ -431,10 +431,10 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
             colors.data_ptr<float>(),
             opacities.data_ptr<float>(),
             reinterpret_cast<vec4 *>(planes.data_ptr<float>()),
+            Ks.data_ptr<float>(),
             backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
                                     : nullptr,
             masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
-            Ks.data_ptr<float>(),
             image_width,
             image_height,
             tile_size,
@@ -473,9 +473,9 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         const at::Tensor colors,                                               \
         const at::Tensor opacities,                                            \
         const at::Tensor planes,                                               \
+        const at::Tensor Ks,                                                   \
         const at::optional<at::Tensor> backgrounds,                            \
         const at::optional<at::Tensor> masks,                                  \
-        const at::Tensor Ks,                                                   \
         uint32_t image_width,                                                  \
         uint32_t image_height,                                                 \
         uint32_t tile_size,                                                    \
