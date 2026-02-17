@@ -1203,7 +1203,7 @@ def fully_fused_projection_with_ut(
     # rolling shutter
     rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
     viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
     """Projects Gaussians to 2D using Unscented Transform (UT).
 
     similar to `fully_fused_projection()`, but supports camera distortion and
